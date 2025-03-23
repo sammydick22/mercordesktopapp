@@ -48,13 +48,16 @@ async def health_check():
     return {"status": "ok"}
 
 # Import and include routers
-from api.routes import time_entries, screenshots, auth, sync
+from api.routes import time_entries, screenshots, auth, sync, clients, projects, settings
 
 # Include routers
 app.include_router(time_entries.router)
 app.include_router(screenshots.router)
 app.include_router(auth.router)
 app.include_router(sync.router)
+app.include_router(clients.router)
+app.include_router(projects.router)
+app.include_router(settings.router)
 
 @app.on_event("startup")
 async def startup_event():
