@@ -39,6 +39,7 @@ async def setup_database():
           executable_path TEXT,
           start_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
           end_time TIMESTAMP,
+          duration INTEGER,
           is_active BOOLEAN NOT NULL DEFAULT 1,
           created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
           updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -145,6 +146,120 @@ async def setup_database():
           created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
           updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
+        ''')
+        
+        # Create clients table
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS clients (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          contact_name TEXT,
+          email TEXT,
+          phone TEXT,
+          address TEXT,
+          notes TEXT,
+          is_active INTEGER NOT NULL DEFAULT 1,
+          user_id TEXT,
+          created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          synced INTEGER NOT NULL DEFAULT 0
+        )
+        ''')
+        
+        # Create index for faster synchronization queries on clients
+        cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_clients_synced 
+        ON clients(synced)
+        ''')
+        
+        # Create projects table
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS projects (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          description TEXT,
+          client_id TEXT,
+          color TEXT,
+          hourly_rate REAL,
+          is_billable INTEGER NOT NULL DEFAULT 1,
+          is_active INTEGER NOT NULL DEFAULT 1,
+          user_id TEXT,
+          created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          synced INTEGER NOT NULL DEFAULT 0,
+          FOREIGN KEY (client_id) REFERENCES clients(id)
+        )
+        ''')
+        
+        # Create index for faster synchronization queries on projects
+        cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_projects_synced 
+        ON projects(synced)
+        ''')
+        
+        # Create project tasks table
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS project_tasks (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          description TEXT,
+          project_id TEXT NOT NULL,
+          estimated_hours REAL,
+          is_active INTEGER NOT NULL DEFAULT 1,
+          created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          synced INTEGER NOT NULL DEFAULT 0,
+          FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        )
+        ''')
+        
+        # Create index for faster synchronization queries on tasks
+        cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_project_tasks_synced 
+        ON project_tasks(synced)
+        ''')
+        
+        # Create user settings table
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS user_settings (
+          user_id TEXT PRIMARY KEY,
+          screenshot_interval INTEGER DEFAULT 600,
+          screenshot_quality TEXT DEFAULT 'medium',
+          auto_sync_interval INTEGER DEFAULT 300,
+          idle_detection_timeout INTEGER DEFAULT 300,
+          theme TEXT DEFAULT 'system',
+          notifications_enabled INTEGER DEFAULT 1,
+          created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          synced INTEGER NOT NULL DEFAULT 0
+        )
+        ''')
+        
+        # Create index for faster synchronization queries on settings
+        cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_user_settings_synced 
+        ON user_settings(synced)
+        ''')
+        
+        # Create user profiles table
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS user_profiles (
+          user_id TEXT PRIMARY KEY,
+          name TEXT,
+          email TEXT,
+          timezone TEXT DEFAULT 'UTC',
+          hourly_rate REAL DEFAULT 0,
+          avatar_url TEXT,
+          created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          synced INTEGER NOT NULL DEFAULT 0
+        )
+        ''')
+        
+        # Create index for faster synchronization queries on profiles
+        cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_user_profiles_synced 
+        ON user_profiles(synced)
         ''')
         
         # Initialize sync_status for each entity type if not already present

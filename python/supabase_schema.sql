@@ -57,6 +57,73 @@ CREATE INDEX IF NOT EXISTS idx_screenshots_org_id ON screenshots(org_id);
 CREATE INDEX IF NOT EXISTS idx_screenshots_activity_log_id ON screenshots(activity_log_id);
 CREATE INDEX IF NOT EXISTS idx_screenshots_taken_at ON screenshots(taken_at);
 
+-- Clients Table
+CREATE TABLE IF NOT EXISTS clients (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    org_id UUID NOT NULL REFERENCES organizations(id),
+    name TEXT NOT NULL,
+    contact_name TEXT,
+    email TEXT,
+    phone TEXT,
+    address TEXT,
+    notes TEXT,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    client_created_at TIMESTAMPTZ DEFAULT NOW(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_clients_user_id ON clients(user_id);
+CREATE INDEX IF NOT EXISTS idx_clients_org_id ON clients(org_id);
+
+-- Projects Table
+CREATE TABLE IF NOT EXISTS projects (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    org_id UUID NOT NULL REFERENCES organizations(id),
+    client_id UUID REFERENCES clients(id),
+    name TEXT NOT NULL,
+    description TEXT,
+    color TEXT,
+    hourly_rate DECIMAL(10,2),
+    is_billable BOOLEAN DEFAULT TRUE,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    client_created_at TIMESTAMPTZ DEFAULT NOW(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_projects_user_id ON projects(user_id);
+CREATE INDEX IF NOT EXISTS idx_projects_org_id ON projects(org_id);
+CREATE INDEX IF NOT EXISTS idx_projects_client_id ON projects(client_id);
+
+-- Project Tasks Table
+CREATE TABLE IF NOT EXISTS project_tasks (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    description TEXT,
+    estimated_hours DECIMAL(10,2),
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    client_created_at TIMESTAMPTZ DEFAULT NOW(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_project_tasks_project_id ON project_tasks(project_id);
+
+-- User Settings Table
+CREATE TABLE IF NOT EXISTS user_settings (
+    user_id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+    screenshot_interval INTEGER DEFAULT 600,
+    screenshot_quality TEXT DEFAULT 'medium',
+    auto_sync_interval INTEGER DEFAULT 300,
+    idle_detection_timeout INTEGER DEFAULT 300,
+    theme TEXT DEFAULT 'system',
+    notifications_enabled BOOLEAN DEFAULT TRUE,
+    client_created_at TIMESTAMPTZ DEFAULT NOW(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- Row Level Security Policies
 -- These ensure that users can only access data from their organization
 
