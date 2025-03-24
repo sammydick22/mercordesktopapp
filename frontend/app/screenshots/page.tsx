@@ -10,10 +10,55 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
 import { DatePicker } from "@/components/ui/date-picker"
-import { Dialog, DialogContent, DialogTrigger } from "@/components/ui/dialog"
+import { Dialog, DialogContent, DialogDescription, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
 import { Camera, Filter, Download, Share2, Trash2, X, Clock, RefreshCw } from "lucide-react"
 import { motion } from "framer-motion"
-import { formatDateTime } from "@/lib/utils"
+import { formatDateTime, cn } from "@/lib/utils"
+
+// React component to define DialogContent
+import * as React from "react"
+import * as DialogPrimitive from "@radix-ui/react-dialog"
+
+// Custom Dialog components with simplified animations
+const SimpleDialogOverlay = React.forwardRef<
+  React.ElementRef<typeof DialogPrimitive.Overlay>,
+  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Overlay>
+>(({ className, ...props }, ref) => (
+  <DialogPrimitive.Overlay
+    ref={ref}
+    className={cn(
+      "fixed inset-0 z-50 bg-black/80 opacity-100 transition-opacity",
+      className
+    )}
+    {...props}
+  />
+))
+SimpleDialogOverlay.displayName = "SimpleDialogOverlay"
+
+const SimpleDialogContent = React.forwardRef<
+  React.ElementRef<typeof DialogPrimitive.Content>,
+  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content>
+>(({ className, children, ...props }, ref) => (
+  <DialogPrimitive.Portal>
+    <SimpleDialogOverlay />
+    <DialogPrimitive.Content
+      ref={ref}
+      className={cn(
+        "fixed left-[50%] top-[50%] z-50 grid w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-4 border p-6 shadow-lg sm:rounded-lg opacity-100 transition-opacity",
+        className
+      )}
+      style={{ transform: "translate(-50%, -50%)" }}
+      {...props}
+    >
+      {children}
+      <DialogPrimitive.Close className="absolute right-4 top-4 rounded-sm opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:pointer-events-none data-[state=open]:bg-accent data-[state=open]:text-muted-foreground">
+        <X className="h-4 w-4" />
+        <span className="sr-only">Close</span>
+      </DialogPrimitive.Close>
+    </DialogPrimitive.Content>
+  </DialogPrimitive.Portal>
+))
+SimpleDialogContent.displayName = "SimpleDialogContent"
 
 interface Screenshot {
   id: string
@@ -34,6 +79,7 @@ export default function ScreenshotsPage() {
   const [filterEndDate, setFilterEndDate] = useState<Date | undefined>(undefined)
   const [filterProject, setFilterProject] = useState<string | undefined>(undefined)
   const [showFilters, setShowFilters] = useState(false)
+  const [selectedScreenshot, setSelectedScreenshot] = useState<Screenshot | null>(null)
   const router = useRouter()
 
   useEffect(() => {
@@ -120,7 +166,9 @@ export default function ScreenshotsPage() {
                 Filter
               </Button>
             </DialogTrigger>
-            <DialogContent className="bg-[#0F172A] border-[#1E293B] text-white">
+            <SimpleDialogContent className="bg-[#0F172A] border-[#1E293B] text-white" style={{ pointerEvents: "auto" }}>
+              <DialogTitle className="sr-only">Filter Screenshots</DialogTitle>
+              <DialogDescription className="sr-only">Filter screenshots by date range</DialogDescription>
               <div className="space-y-4 py-4">
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-2">
@@ -157,7 +205,7 @@ export default function ScreenshotsPage() {
                   </Button>
                 </div>
               </div>
-            </DialogContent>
+            </SimpleDialogContent>
           </Dialog>
 
           <Button
@@ -223,93 +271,38 @@ export default function ScreenshotsPage() {
                     animate={{ opacity: 1, scale: 1 }}
                     transition={{ duration: 0.3, delay: index * 0.05 }}
                   >
-                    <Dialog>
-                      <DialogTrigger asChild>
-                        <Card className="bg-[#0F172A] border-[#1E293B] rounded-2xl overflow-hidden transition-all duration-300 hover:transform hover:-translate-y-1 cursor-pointer">
-                          <CardContent className="p-2">
-                            <div className="aspect-video relative overflow-hidden rounded-md">
-                              <Image
-                                src={screenshotsApi.getScreenshotThumbnailUrl(screenshot.id) || "/placeholder.svg"}
-                                alt={`Screenshot from ${formatDateTime(screenshot.timestamp)}`}
-                                fill
-                                className="object-cover"
-                              />
-                              <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent opacity-0 hover:opacity-100 transition-opacity duration-200">
-                                <div className="absolute bottom-2 left-2 right-2 flex items-center justify-between">
-                                  <div className="text-xs text-white flex items-center">
-                                    <Clock className="mr-1 h-3 w-3" />
-                                    {formatDateTime(screenshot.timestamp)}
-                                  </div>
-                                  <div className="flex gap-1">
-                                    {!screenshot.synced && (
-                                      <div className="bg-amber-500/10 text-amber-500 rounded-full px-2 py-0.5 text-[10px]">
-                                        Not synced
-                                      </div>
-                                    )}
-                                  </div>
+                    <button 
+                      className="w-full" 
+                      onClick={() => setSelectedScreenshot(screenshot)}
+                    >
+                      <Card role="button" tabIndex={0} className="bg-[#0F172A] border-[#1E293B] rounded-2xl overflow-hidden transition-all duration-300 hover:transform hover:-translate-y-1 cursor-pointer">
+                        <CardContent className="p-2">
+                          <div className="aspect-video relative overflow-hidden rounded-md">
+                            <Image
+                              src={screenshotsApi.getScreenshotThumbnailUrl(screenshot.id) || "/placeholder.svg"}
+                              alt={`Screenshot from ${formatDateTime(screenshot.timestamp)}`}
+                              fill
+                              className="object-cover"
+                            />
+                            <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent opacity-0 hover:opacity-100 transition-opacity duration-200">
+                              <div className="absolute bottom-2 left-2 right-2 flex items-center justify-between">
+                                <div className="text-xs text-white flex items-center">
+                                  <Clock className="mr-1 h-3 w-3" />
+                                  {formatDateTime(screenshot.timestamp)}
+                                </div>
+                                <div className="flex gap-1">
+                                  {!screenshot.synced && (
+                                    <div className="bg-amber-500/10 text-amber-500 rounded-full px-2 py-0.5 text-[10px]">
+                                      Not synced
+                                    </div>
+                                  )}
                                 </div>
                               </div>
                             </div>
-                          </CardContent>
-                        </Card>
-                      </DialogTrigger>
-                      <DialogContent className="max-w-4xl p-0 overflow-hidden rounded-2xl bg-[#0F172A] border-[#1E293B] shadow-2xl">
-                        <div className="relative">
-                          <div className="absolute top-2 right-2 z-10 flex gap-2">
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="rounded-full bg-black/20 backdrop-blur-sm hover:bg-black/40 text-white"
-                            >
-                              <Download size={16} />
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="rounded-full bg-black/20 backdrop-blur-sm hover:bg-black/40 text-white"
-                            >
-                              <Share2 size={16} />
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="rounded-full bg-black/20 backdrop-blur-sm hover:bg-black/40 text-white"
-                            >
-                              <Trash2 size={16} />
-                            </Button>
-                            <DialogTrigger asChild>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="rounded-full bg-black/20 backdrop-blur-sm hover:bg-black/40 text-white"
-                              >
-                                <X size={16} />
-                              </Button>
-                            </DialogTrigger>
                           </div>
-                          <div className="relative aspect-video">
-                            <Image
-                              src={screenshotsApi.getScreenshotUrl(screenshot.id) || "/placeholder.svg"}
-                              alt={`Screenshot from ${formatDateTime(screenshot.timestamp)}`}
-                              fill
-                              className="object-contain"
-                            />
-                          </div>
-                        </div>
-                        <div className="p-4 bg-[#1E293B]">
-                          <div className="flex items-center justify-between">
-                            <div className="text-sm text-gray-300">
-                              Captured at {formatDateTime(screenshot.timestamp)}
-                            </div>
-                            {!screenshot.synced && (
-                              <div className="bg-amber-500/10 text-amber-500 rounded-full px-2.5 py-0.5 text-xs font-medium">
-                                Not synced
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      </DialogContent>
-                    </Dialog>
+                        </CardContent>
+                      </Card>
+                    </button>
                   </motion.div>
                 ))}
               </div>
@@ -317,7 +310,65 @@ export default function ScreenshotsPage() {
           </CardContent>
         </Card>
       </motion.div>
+
+      {/* Custom full-screen screenshot preview */}
+      {selectedScreenshot && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80" style={{ pointerEvents: 'auto' }}>
+          <div className="relative w-full max-w-4xl p-0 overflow-hidden rounded-2xl bg-[#0F172A] border-[#1E293B] shadow-2xl">
+            <div className="absolute top-2 right-2 z-10 flex gap-2">
+              <Button
+                variant="ghost"
+                size="icon"
+                className="rounded-full bg-black/20 backdrop-blur-sm hover:bg-black/40 text-white"
+              >
+                <Download size={16} />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="rounded-full bg-black/20 backdrop-blur-sm hover:bg-black/40 text-white"
+              >
+                <Share2 size={16} />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="rounded-full bg-black/20 backdrop-blur-sm hover:bg-black/40 text-white"
+              >
+                <Trash2 size={16} />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="rounded-full bg-black/20 backdrop-blur-sm hover:bg-black/40 text-white"
+                onClick={() => setSelectedScreenshot(null)}
+              >
+                <X size={16} />
+              </Button>
+            </div>
+            <div className="relative aspect-video">
+              <Image
+                src={screenshotsApi.getScreenshotUrl(selectedScreenshot.id) || "/placeholder.svg"}
+                alt={`Screenshot from ${formatDateTime(selectedScreenshot.timestamp)}`}
+                fill
+                className="object-contain"
+              />
+            </div>
+            <div className="p-4 bg-[#1E293B]">
+              <div className="flex items-center justify-between">
+                <div className="text-sm text-gray-300">
+                  Captured at {formatDateTime(selectedScreenshot.timestamp)}
+                </div>
+                {!selectedScreenshot.synced && (
+                  <div className="bg-amber-500/10 text-amber-500 rounded-full px-2.5 py-0.5 text-xs font-medium">
+                    Not synced
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
-

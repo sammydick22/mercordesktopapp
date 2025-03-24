@@ -178,6 +178,42 @@ class DatabaseService:
             )
             ''')
             
+            # Clients table
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS clients (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                contact_name TEXT,
+                email TEXT,
+                phone TEXT,
+                address TEXT,
+                notes TEXT,
+                is_active BOOLEAN NOT NULL DEFAULT 1,
+                synced BOOLEAN NOT NULL DEFAULT 0,
+                created_at TIMESTAMP NOT NULL,
+                updated_at TIMESTAMP NOT NULL,
+                user_id TEXT NOT NULL
+            )
+            ''')
+            
+            # Projects table
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS projects (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                client_id TEXT,
+                description TEXT,
+                color TEXT,
+                hourly_rate REAL DEFAULT 0,
+                is_billable BOOLEAN NOT NULL DEFAULT 1,
+                is_active BOOLEAN NOT NULL DEFAULT 1,
+                synced BOOLEAN NOT NULL DEFAULT 0,
+                created_at TIMESTAMP NOT NULL,
+                updated_at TIMESTAMP NOT NULL,
+                FOREIGN KEY (client_id) REFERENCES clients(id)
+            )
+            ''')
+            
             # Create indices
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_activity_logs_is_active ON activity_logs(is_active)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_activity_logs_synced ON activity_logs(synced)')
@@ -186,6 +222,8 @@ class DatabaseService:
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_system_metrics_activity_log_id ON system_metrics(activity_log_id)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_system_metrics_synced ON system_metrics(synced)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_org_members_user_id ON org_members(user_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_clients_name ON clients(name)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_projects_client_id ON projects(client_id)')
             
             # Initialize sync status for each entity type if not exists
             self._ensure_sync_status("activity_logs")
@@ -1311,3 +1349,238 @@ class DatabaseService:
         except Exception as e:
             logger.error(f"Error getting user organization membership: {str(e)}")
             return None
+
+    # Client CRUD operations
+    def get_clients(self, limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
+        """
+        Get clients with pagination.
+        
+        Args:
+            limit: Maximum number of clients to return
+            offset: Offset for pagination
+            
+        Returns:
+            list: List of clients
+        """
+        try:
+            cursor = self.conn.cursor()
+            
+            # Count total clients
+            cursor.execute('SELECT COUNT(*) FROM clients')
+            total = cursor.fetchone()[0]
+            
+            # Build query
+            query = '''
+            SELECT 
+                id, name, contact_name, email, phone, address, notes,
+                is_active, synced, created_at, updated_at
+            FROM clients 
+            ORDER BY name ASC
+            LIMIT ? OFFSET ?
+            '''
+            
+            # Execute query
+            cursor.execute(query, (limit, offset))
+            
+            # Get results
+            results = cursor.fetchall()
+            
+            # Convert to list of dictionaries
+            column_names = [
+                'id', 'name', 'contact_name', 'email', 'phone', 
+                'address', 'notes', 'is_active', 'synced', 
+                'created_at', 'updated_at'
+            ]
+            
+            return {
+                "total": total,
+                "clients": [dict(zip(column_names, row)) for row in results]
+            }
+        except Exception as e:
+            logger.error(f"Error getting clients: {str(e)}")
+            return {"total": 0, "clients": []}
+            
+    def get_client(self, client_id: str) -> Dict[str, Any]:
+        """
+        Get a client by ID.
+        
+        Args:
+            client_id: ID of the client to get
+            
+        Returns:
+            dict: The client
+        """
+        try:
+            cursor = self.conn.cursor()
+            
+            # Get the client
+            cursor.execute(
+                '''
+                SELECT 
+                    id, name, contact_name, email, phone, address, notes,
+                    is_active, synced, created_at, updated_at
+                FROM clients 
+                WHERE id = ?
+                ''',
+                (client_id,)
+            )
+            
+            client = cursor.fetchone()
+            
+            if not client:
+                return {}
+                
+            # Convert to dictionary
+            column_names = [
+                'id', 'name', 'contact_name', 'email', 'phone', 
+                'address', 'notes', 'is_active', 'synced', 
+                'created_at', 'updated_at'
+            ]
+            
+            return dict(zip(column_names, client))
+        except Exception as e:
+            logger.error(f"Error getting client: {str(e)}")
+            return {}
+            
+    def create_client(self, client_data: Dict[str, Any], user_id: str) -> Dict[str, Any]:
+        """
+        Create a new client.
+        
+        Args:
+            client_data: Client data
+            user_id: ID of the user creating the client
+            
+        Returns:
+            dict: The created client
+        """
+        try:
+            cursor = self.conn.cursor()
+            
+            # Generate ID and timestamps
+            client_id = str(uuid.uuid4())
+            now = datetime.now().isoformat()
+            
+            # Insert client
+            cursor.execute(
+                '''
+                INSERT INTO clients
+                (id, name, contact_name, email, phone, address, notes, 
+                is_active, created_at, updated_at, user_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''',
+                (
+                    client_id,
+                    client_data.get('name', ''),
+                    client_data.get('contact_name'),
+                    client_data.get('email'),
+                    client_data.get('phone'),
+                    client_data.get('address'),
+                    client_data.get('notes'),
+                    1,  # is_active = True
+                    now,
+                    now,
+                    user_id
+                )
+            )
+            
+            # Commit changes
+            self.conn.commit()
+            
+            # Return the created client
+            return self.get_client(client_id)
+        except Exception as e:
+            logger.error(f"Error creating client: {str(e)}")
+            self.conn.rollback()
+            return {}
+            
+    def update_client(self, client_id: str, client_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Update a client.
+        
+        Args:
+            client_id: ID of the client to update
+            client_data: Client data to update
+            
+        Returns:
+            dict: The updated client
+        """
+        try:
+            cursor = self.conn.cursor()
+            
+            # Get the client to check if it exists
+            client = self.get_client(client_id)
+            if not client:
+                return {}
+                
+            # Build update parts
+            update_parts = []
+            params = []
+            
+            # Add fields to update
+            for field in ['name', 'contact_name', 'email', 'phone', 'address', 'notes', 'is_active']:
+                if field in client_data:
+                    update_parts.append(f"{field} = ?")
+                    params.append(client_data[field])
+            
+            # Add updated_at timestamp
+            update_parts.append("updated_at = ?")
+            params.append(datetime.now().isoformat())
+            
+            # Add client_id to params
+            params.append(client_id)
+            
+            # Execute update
+            cursor.execute(
+                f'''
+                UPDATE clients 
+                SET {', '.join(update_parts)}
+                WHERE id = ?
+                ''',
+                tuple(params)
+            )
+            
+            # Commit changes
+            self.conn.commit()
+            
+            # Return the updated client
+            return self.get_client(client_id)
+        except Exception as e:
+            logger.error(f"Error updating client: {str(e)}")
+            self.conn.rollback()
+            return {}
+            
+    def delete_client(self, client_id: str) -> bool:
+        """
+        Delete a client.
+        
+        Args:
+            client_id: ID of the client to delete
+            
+        Returns:
+            bool: True if successful
+        """
+        try:
+            cursor = self.conn.cursor()
+            
+            # Get the client to check if it exists
+            client = self.get_client(client_id)
+            if not client:
+                return False
+                
+            # Delete the client
+            cursor.execute(
+                '''
+                DELETE FROM clients 
+                WHERE id = ?
+                ''',
+                (client_id,)
+            )
+            
+            # Commit changes
+            self.conn.commit()
+            
+            return True
+        except Exception as e:
+            logger.error(f"Error deleting client: {str(e)}")
+            self.conn.rollback()
+            return False

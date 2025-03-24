@@ -21,9 +21,55 @@ import {
 import { Textarea } from "@/components/ui/textarea"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Badge } from "@/components/ui/badge"
-import { Users, Plus, Search, Edit, Trash2, MoreHorizontal, RefreshCw, Mail, Phone } from "lucide-react"
+import { Users, Plus, Search, Edit, Trash2, MoreHorizontal, RefreshCw, Mail, Phone, X } from "lucide-react"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { motion } from "framer-motion"
+import { cn } from "@/lib/utils"
+
+// React component to define DialogContent
+import * as React from "react"
+import * as DialogPrimitive from "@radix-ui/react-dialog"
+
+// Custom Dialog components with simplified animations
+const SimpleDialogOverlay = React.forwardRef<
+  React.ElementRef<typeof DialogPrimitive.Overlay>,
+  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Overlay>
+>(({ className, ...props }, ref) => (
+  <DialogPrimitive.Overlay
+    ref={ref}
+    className={cn(
+      "fixed inset-0 z-50 bg-black/80 opacity-100 transition-opacity",
+      className
+    )}
+    {...props}
+  />
+))
+SimpleDialogOverlay.displayName = "SimpleDialogOverlay"
+
+const SimpleDialogContent = React.forwardRef<
+  React.ElementRef<typeof DialogPrimitive.Content>,
+  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content>
+>(({ className, children, ...props }, ref) => (
+  <DialogPrimitive.Portal>
+    <SimpleDialogOverlay />
+    <DialogPrimitive.Content
+      ref={ref}
+      className={cn(
+        "fixed left-[50%] top-[50%] z-50 grid w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-4 border p-6 shadow-lg sm:rounded-lg opacity-100 transition-opacity",
+        className
+      )}
+      style={{ transform: "translate(-50%, -50%)" }}
+      {...props}
+    >
+      {children}
+      <DialogPrimitive.Close className="absolute right-4 top-4 rounded-sm opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:pointer-events-none data-[state=open]:bg-accent data-[state=open]:text-muted-foreground">
+        <X className="h-4 w-4" />
+        <span className="sr-only">Close</span>
+      </DialogPrimitive.Close>
+    </DialogPrimitive.Content>
+  </DialogPrimitive.Portal>
+))
+SimpleDialogContent.displayName = "SimpleDialogContent"
 
 export default function ClientsPage() {
   const { user, loading: authLoading } = useAuth()
@@ -62,6 +108,14 @@ export default function ClientsPage() {
       (client.email && client.email.toLowerCase().includes(searchQuery.toLowerCase())),
   )
 
+  // Use a custom dialog open handler with setTimeout to ensure the DOM is ready
+  const handleOpenDialog = () => {
+    // Force the action to occur on the next event loop tick
+    setTimeout(() => {
+      setShowAddClient(true)
+    }, 10) // Increase timeout slightly
+  }
+
   const handleCreateClient = useCallback(async () => {
     try {
       await createClient(newClient)
@@ -74,7 +128,11 @@ export default function ClientsPage() {
         address: "",
         notes: "",
       })
-      fetchClients()
+      
+      // Add a slight delay before fetching clients to ensure database has completed the operation
+      setTimeout(() => {
+        fetchClients()
+      }, 500)
     } catch (err) {
       console.error("Error creating client:", err)
     }
@@ -141,13 +199,14 @@ export default function ClientsPage() {
             />
           </div>
           <Dialog open={showAddClient} onOpenChange={setShowAddClient}>
-            <DialogTrigger asChild>
-              <Button className="bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white font-medium rounded-full px-6 py-2.5">
-                <Plus className="mr-2 h-4 w-4" />
-                New Client
-              </Button>
-            </DialogTrigger>
-            <DialogContent className="bg-[#0F172A] border-[#1E293B] text-white">
+            <Button 
+              onClick={handleOpenDialog}
+              className="bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white font-medium rounded-full px-6 py-2.5"
+            >
+              <Plus className="mr-2 h-4 w-4" />
+              New Client
+            </Button>
+            <SimpleDialogContent className="bg-[#0F172A] border-[#1E293B] text-white" style={{ pointerEvents: "auto" }}>
               <DialogHeader>
                 <DialogTitle>Create New Client</DialogTitle>
                 <DialogDescription className="text-gray-400">Add a new client to your account.</DialogDescription>
@@ -233,7 +292,7 @@ export default function ClientsPage() {
                   Create Client
                 </Button>
               </DialogFooter>
-            </DialogContent>
+            </SimpleDialogContent>
           </Dialog>
         </div>
       </motion.div>
@@ -279,13 +338,27 @@ function ClientsTable({
   onArchive: (id: string) => void
   onDelete: (id: string) => void
 }) {
+  // Get reference to parent component's handleOpenDialog function
+  const parentHandleOpenDialog = () => {
+    setTimeout(() => {
+      // Since this is in a different component, we indirectly trigger
+      // the dialog by setting showAddClient in the parent component
+      const newClientBtn = document.querySelector('button[aria-haspopup="dialog"]');
+      if (newClientBtn) {
+        (newClientBtn as HTMLButtonElement).click();
+      }
+    }, 10);
+  };
   if (clients.length === 0) {
     return (
       <div className="text-center py-12 text-gray-400">
         <div className="flex flex-col items-center gap-3">
           <Users className="h-12 w-12 text-gray-500/50" />
           <p>No clients found</p>
-          <Button className="bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white font-medium rounded-full px-6 py-2.5 mt-2">
+          <Button 
+            onClick={parentHandleOpenDialog}
+            className="bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white font-medium rounded-full px-6 py-2.5 mt-2"
+          >
             <Plus className="mr-2 h-4 w-4" />
             Create Client
           </Button>
@@ -380,4 +453,3 @@ function ClientsTable({
     </Card>
   )
 }
-

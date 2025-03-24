@@ -8,9 +8,13 @@ import logging
 import uuid
 
 from api.dependencies import get_current_user
+from services.database import DatabaseService
 
 # Setup logger
 logger = logging.getLogger(__name__)
+
+# Create database service
+db_service = DatabaseService()
 
 # Create router
 router = APIRouter(
@@ -18,10 +22,6 @@ router = APIRouter(
     tags=["clients"],
     responses={404: {"description": "Not found"}},
 )
-
-# Temporary placeholder for client data
-# In the real implementation, this will use Supabase
-clients = []
 
 @router.get("/")
 async def list_clients(
@@ -39,13 +39,10 @@ async def list_clients(
     Returns:
         List of clients
     """
-    start = offset
-    end = offset + limit
+    # Get clients from database
+    result = db_service.get_clients(limit, offset)
     
-    return {
-        "total": len(clients),
-        "clients": clients[start:end]
-    }
+    return result
 
 @router.get("/{client_id}")
 async def get_client(
@@ -61,11 +58,13 @@ async def get_client(
     Returns:
         The client
     """
-    for client in clients:
-        if client["id"] == client_id:
-            return {"client": client}
+    # Get client from database
+    client = db_service.get_client(client_id)
     
-    raise HTTPException(status_code=404, detail="Client not found")
+    if not client:
+        raise HTTPException(status_code=404, detail="Client not found")
+    
+    return {"client": client}
 
 @router.post("/")
 async def create_client(
@@ -81,24 +80,25 @@ async def create_client(
     Returns:
         The created client
     """
-    now = datetime.utcnow().isoformat()
+    # Get user ID from current user
+    user_id = current_user.get('id')
+    if not user_id:
+        raise HTTPException(status_code=400, detail="User ID is required")
     
-    # Create new client
-    new_client = {
-        "id": str(uuid.uuid4()),
-        "name": client.get("name"),
-        "contact_name": client.get("contact_name"),
-        "email": client.get("email"),
-        "phone": client.get("phone"),
-        "address": client.get("address"),
-        "notes": client.get("notes"),
-        "is_active": True,
-        "created_at": now,
-        "updated_at": now
-    }
+    # Extract name from client data
+    name = client.get("name", "")
+    if not name:
+        raise HTTPException(status_code=400, detail="Client name is required")
     
-    # Store the client
-    clients.append(new_client)
+    # Create a copy of client data without the 'name' key to avoid duplicate argument
+    client_data = {k: v for k, v in client.items() if k != 'name'}
+    
+    # Create client in database
+    # Pass name and user_id as positional arguments and the rest as kwargs
+    new_client = db_service.create_client(name, user_id, **client_data)
+    
+    if not new_client:
+        raise HTTPException(status_code=500, detail="Failed to create client")
     
     logger.info(f"Created client {new_client['id']}")
     
@@ -120,21 +120,15 @@ async def update_client(
     Returns:
         The updated client
     """
-    for client in clients:
-        if client["id"] == client_id:
-            # Update client fields
-            for key, value in client_data.items():
-                if key in client:
-                    client[key] = value
-            
-            # Update the updated_at timestamp
-            client["updated_at"] = datetime.utcnow().isoformat()
-            
-            logger.info(f"Updated client {client_id}")
-            
-            return {"client": client}
+    # Update client in database
+    updated_client = db_service.update_client(client_id, client_data)
     
-    raise HTTPException(status_code=404, detail="Client not found")
+    if not updated_client:
+        raise HTTPException(status_code=404, detail="Client not found")
+    
+    logger.info(f"Updated client {client_id}")
+    
+    return {"client": updated_client}
 
 @router.delete("/{client_id}")
 async def delete_client(
@@ -150,13 +144,16 @@ async def delete_client(
     Returns:
         Success message
     """
-    for i, client in enumerate(clients):
-        if client["id"] == client_id:
-            # Remove the client
-            deleted_client = clients.pop(i)
-            
-            logger.info(f"Deleted client {client_id}")
-            
-            return {"client": deleted_client}
+    # Get client before deletion
+    client = db_service.get_client(client_id)
     
-    raise HTTPException(status_code=404, detail="Client not found")
+    if not client:
+        raise HTTPException(status_code=404, detail="Client not found")
+    
+    # Delete client from database
+    if not db_service.delete_client(client_id):
+        raise HTTPException(status_code=500, detail="Failed to delete client")
+    
+    logger.info(f"Deleted client {client_id}")
+    
+    return {"client": client}

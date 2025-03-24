@@ -9,6 +9,7 @@ import os
 import logging
 
 from api.dependencies import get_current_user
+from core.screenshot_service import ScreenshotService
 
 # Setup logger
 logger = logging.getLogger(__name__)
@@ -30,6 +31,9 @@ def get_screenshots_dir():
     os.makedirs(screenshots_dir, exist_ok=True)
     return screenshots_dir
 
+# Initialize screenshot service
+screenshot_service = ScreenshotService()
+
 @router.post("/capture")
 async def capture_screenshot(
     background_tasks: BackgroundTasks,
@@ -45,35 +49,17 @@ async def capture_screenshot(
     Returns:
         The screenshot metadata
     """
-    # This would use the screenshot service in a real implementation
-    # For now, we'll just create a mock screenshot entry
+    # Use the screenshot service to capture a real screenshot
+    screenshot_data = screenshot_service.capture_screenshot(time_entry_id)
     
+    if not screenshot_data:
+        raise HTTPException(status_code=500, detail="Failed to capture screenshot")
+    
+    # Add an ID and synced status to the metadata
     screenshot_id = f"ss_{len(screenshots) + 1}"
-    timestamp = datetime.utcnow()
-    filename = f"screenshot_{timestamp.strftime('%Y%m%d_%H%M%S')}.png"
-    thumbnail_filename = f"screenshot_{timestamp.strftime('%Y%m%d_%H%M%S')}_thumb.png"
-    
-    filepath = os.path.join(get_screenshots_dir(), filename)
-    thumbnail_path = os.path.join(get_screenshots_dir(), thumbnail_filename)
-    
-    # Mock screenshot capturing
-    # In a real implementation, this would use the mss library to capture the screen
-    # and Pillow to create a thumbnail
-    
-    # Create mock files (empty)
-    with open(filepath, 'w') as f:
-        f.write("Mock screenshot")
-    
-    with open(thumbnail_path, 'w') as f:
-        f.write("Mock thumbnail")
-    
-    # Create screenshot entry
     screenshot = {
         "id": screenshot_id,
-        "timestamp": timestamp.isoformat(),
-        "filepath": filepath,
-        "thumbnail_path": thumbnail_path,
-        "time_entry_id": time_entry_id,
+        **screenshot_data,
         "synced": False
     }
     
@@ -140,8 +126,7 @@ async def get_screenshot(
 
 @router.get("/{screenshot_id}/image")
 async def get_screenshot_image(
-    screenshot_id: str,
-    current_user: Dict[str, Any] = Depends(get_current_user)
+    screenshot_id: str
 ):
     """
     Get the image file for a specific screenshot.
@@ -152,6 +137,10 @@ async def get_screenshot_image(
     Returns:
         The screenshot image file
     """
+    # Basic validation for security
+    if not screenshot_id or not screenshot_id.startswith("ss_"):
+        raise HTTPException(status_code=400, detail="Invalid screenshot ID")
+        
     # Find the screenshot
     for screenshot in screenshots:
         if screenshot["id"] == screenshot_id:
@@ -163,8 +152,7 @@ async def get_screenshot_image(
 
 @router.get("/{screenshot_id}/thumbnail")
 async def get_screenshot_thumbnail(
-    screenshot_id: str,
-    current_user: Dict[str, Any] = Depends(get_current_user)
+    screenshot_id: str
 ):
     """
     Get the thumbnail image for a specific screenshot.
@@ -175,6 +163,10 @@ async def get_screenshot_thumbnail(
     Returns:
         The screenshot thumbnail image file
     """
+    # Basic validation for security
+    if not screenshot_id or not screenshot_id.startswith("ss_"):
+        raise HTTPException(status_code=400, detail="Invalid screenshot ID")
+        
     # Find the screenshot
     for screenshot in screenshots:
         if screenshot["id"] == screenshot_id:

@@ -12,6 +12,7 @@ import { Label } from "@/components/ui/label"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import {
   Dialog,
+  DialogClose,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -24,10 +25,55 @@ import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Badge } from "@/components/ui/badge"
-import { Briefcase, Plus, Search, Edit, Trash2, MoreHorizontal, RefreshCw, ListTodo } from "lucide-react"
+import { Briefcase, Plus, Search, Edit, Trash2, MoreHorizontal, RefreshCw, ListTodo, X } from "lucide-react"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { motion } from "framer-motion"
-import { formatDate } from "@/lib/utils"
+import { formatDate, cn } from "@/lib/utils"
+
+// React component to define DialogContent
+import * as React from "react"
+import * as DialogPrimitive from "@radix-ui/react-dialog"
+
+// Custom Dialog components with simplified animations
+const SimpleDialogOverlay = React.forwardRef<
+  React.ElementRef<typeof DialogPrimitive.Overlay>,
+  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Overlay>
+>(({ className, ...props }, ref) => (
+  <DialogPrimitive.Overlay
+    ref={ref}
+    className={cn(
+      "fixed inset-0 z-50 bg-black/80 opacity-100 transition-opacity",
+      className
+    )}
+    {...props}
+  />
+))
+SimpleDialogOverlay.displayName = "SimpleDialogOverlay"
+
+const SimpleDialogContent = React.forwardRef<
+  React.ElementRef<typeof DialogPrimitive.Content>,
+  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content>
+>(({ className, children, ...props }, ref) => (
+  <DialogPrimitive.Portal>
+    <SimpleDialogOverlay />
+    <DialogPrimitive.Content
+      ref={ref}
+      className={cn(
+        "fixed left-[50%] top-[50%] z-50 grid w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-4 border p-6 shadow-lg sm:rounded-lg opacity-100 transition-opacity",
+        className
+      )}
+      style={{ transform: "translate(-50%, -50%)" }}
+      {...props}
+    >
+      {children}
+      <DialogPrimitive.Close className="absolute right-4 top-4 rounded-sm opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:pointer-events-none data-[state=open]:bg-accent data-[state=open]:text-muted-foreground">
+        <X className="h-4 w-4" />
+        <span className="sr-only">Close</span>
+      </DialogPrimitive.Close>
+    </DialogPrimitive.Content>
+  </DialogPrimitive.Portal>
+))
+SimpleDialogContent.displayName = "SimpleDialogContent"
 
 export default function ProjectsPage() {
   const { user, loading: authLoading } = useAuth()
@@ -70,10 +116,22 @@ export default function ProjectsPage() {
         hourly_rate: 0,
         is_billable: true,
       })
-      fetchProjects()
+      
+      // Add a slight delay before fetching projects to ensure database has completed the operation
+      setTimeout(() => {
+        fetchProjects()
+      }, 500)
     } catch (err) {
       console.error("Error creating project:", err)
     }
+  }
+
+  // Use a custom dialog open handler with setTimeout to ensure the DOM is ready
+  const handleOpenDialog = () => {
+    // Force the action to occur on the next event loop tick
+    setTimeout(() => {
+      setShowAddProject(true)
+    }, 10) // Increase timeout slightly
   }
 
   if (authLoading || !user) {
@@ -112,14 +170,17 @@ export default function ProjectsPage() {
               onChange={(e) => setSearchQuery(e.target.value)}
             />
           </div>
+          <Button 
+            onClick={handleOpenDialog}
+            className="bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white font-medium rounded-full px-6 py-2.5"
+          >
+            <Plus className="mr-2 h-4 w-4" />
+            New Project
+          </Button>
+          
+          {/* Fixed dialog that doesn't use DialogTrigger */}
           <Dialog open={showAddProject} onOpenChange={setShowAddProject}>
-            <DialogTrigger asChild>
-              <Button className="bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white font-medium rounded-full px-6 py-2.5">
-                <Plus className="mr-2 h-4 w-4" />
-                New Project
-              </Button>
-            </DialogTrigger>
-            <DialogContent className="bg-[#0F172A] border-[#1E293B] text-white">
+            <SimpleDialogContent className="bg-[#0F172A] border-[#1E293B] text-white" style={{ pointerEvents: "auto" }}>
               <DialogHeader>
                 <DialogTitle>Create New Project</DialogTitle>
                 <DialogDescription className="text-gray-400">
@@ -135,6 +196,7 @@ export default function ProjectsPage() {
                     className="bg-[#1E293B] border-[#2D3748] text-white"
                     value={newProject.name}
                     onChange={(e) => setNewProject({ ...newProject, name: e.target.value })}
+                    autoComplete="off"
                   />
                 </div>
                 <div className="space-y-2">
@@ -190,6 +252,7 @@ export default function ProjectsPage() {
                       className="bg-[#1E293B] border-[#2D3748] text-white"
                       value={newProject.hourly_rate}
                       onChange={(e) => setNewProject({ ...newProject, hourly_rate: Number.parseFloat(e.target.value) })}
+                      autoComplete="off"
                     />
                   </div>
                 </div>
@@ -203,22 +266,25 @@ export default function ProjectsPage() {
                 </div>
               </div>
               <DialogFooter>
-                <Button
-                  variant="outline"
-                  onClick={() => setShowAddProject(false)}
-                  className="bg-transparent border-[#2D3748] text-white hover:bg-[#1E293B]"
-                >
-                  Cancel
-                </Button>
-                <Button
-                  onClick={handleCreateProject}
-                  className="bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white"
-                  disabled={!newProject.name}
-                >
-                  Create Project
-                </Button>
+                <DialogClose asChild>
+                  <Button
+                    variant="outline"
+                    className="bg-transparent border-[#2D3748] text-white hover:bg-[#1E293B]"
+                  >
+                    Cancel
+                 </Button>
+                </DialogClose>
+                <DialogClose asChild>
+                  <Button
+                    onClick={handleCreateProject}
+                    className="bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white"
+                    disabled={!newProject.name}
+                  >
+                    Create Project
+                  </Button>
+                </DialogClose>
               </DialogFooter>
-            </DialogContent>
+              </SimpleDialogContent>
           </Dialog>
         </div>
       </motion.div>
@@ -244,6 +310,7 @@ export default function ProjectsPage() {
             projects={filteredProjects}
             showProjectTasks={showProjectTasks}
             setShowProjectTasks={setShowProjectTasks}
+            handleOpenParentDialog={handleOpenDialog}
           />
         </TabsContent>
 
@@ -252,6 +319,7 @@ export default function ProjectsPage() {
             projects={filteredProjects.filter((p) => p.is_active)}
             showProjectTasks={showProjectTasks}
             setShowProjectTasks={setShowProjectTasks}
+            handleOpenParentDialog={handleOpenDialog}
           />
         </TabsContent>
       </Tabs>
@@ -263,10 +331,12 @@ function ProjectsTable({
   projects,
   showProjectTasks,
   setShowProjectTasks,
+  handleOpenParentDialog,
 }: {
   projects: any[]
   showProjectTasks: string | null
   setShowProjectTasks: (id: string | null) => void
+  handleOpenParentDialog: () => void
 }) {
   const { getProjectTasks, createProjectTask, updateProject, deleteProject } = useProjects()
   const [tasks, setTasks] = useState<any[]>([])
@@ -310,7 +380,11 @@ function ProjectsTable({
         description: "",
         estimated_hours: 0,
       })
-      fetchTasks(showProjectTasks)
+      
+      // Add a slight delay before fetching tasks to ensure database has completed the operation
+      setTimeout(() => {
+        fetchTasks(showProjectTasks)
+      }, 500)
     } catch (err) {
       console.error("Error creating task:", err)
     }
@@ -332,13 +406,31 @@ function ProjectsTable({
     }
   }
 
+  // Custom handlers with setTimeout for dialogs
+  const handleOpenTaskDialog = () => {
+    setTimeout(() => {
+      setShowAddTask(true)
+    }, 10) // Increase timeout slightly
+  }
+  
+  // This is for the button in the "No projects found" section
+  const handleOpenProjectDialog = () => {
+    setTimeout(() => {
+      // Since this is in a different component, we need to use the parent state setter
+      setShowProjectTasks(null) // Make sure we're in the projects view
+    }, 0)
+  }
+
   if (projects.length === 0) {
     return (
       <div className="text-center py-12 text-gray-400">
         <div className="flex flex-col items-center gap-3">
           <Briefcase className="h-12 w-12 text-gray-500/50" />
           <p>No projects found</p>
-          <Button className="bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white font-medium rounded-full px-6 py-2.5 mt-2">
+          <Button 
+            onClick={handleOpenParentDialog}
+            className="bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white font-medium rounded-full px-6 py-2.5 mt-2"
+          >
             <Plus className="mr-2 h-4 w-4" />
             Create Project
           </Button>
@@ -365,14 +457,16 @@ function ProjectsTable({
                 {projects.find((p) => p.id === showProjectTasks)?.name} - Tasks
               </h3>
             </div>
+            <Button 
+              onClick={handleOpenTaskDialog}
+              className="bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white font-medium rounded-full px-6 py-2.5"
+            >
+              <Plus className="mr-2 h-4 w-4" />
+              New Task
+            </Button>
+            
             <Dialog open={showAddTask} onOpenChange={setShowAddTask}>
-              <DialogTrigger asChild>
-                <Button className="bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white font-medium rounded-full px-6 py-2.5">
-                  <Plus className="mr-2 h-4 w-4" />
-                  New Task
-                </Button>
-              </DialogTrigger>
-              <DialogContent className="bg-[#0F172A] border-[#1E293B] text-white">
+              <SimpleDialogContent className="bg-[#0F172A] border-[#1E293B] text-white" style={{ pointerEvents: "auto" }}>
                 <DialogHeader>
                   <DialogTitle>Create New Task</DialogTitle>
                   <DialogDescription className="text-gray-400">Add a new task to this project.</DialogDescription>
@@ -386,6 +480,7 @@ function ProjectsTable({
                       className="bg-[#1E293B] border-[#2D3748] text-white"
                       value={newTask.name}
                       onChange={(e) => setNewTask({ ...newTask, name: e.target.value })}
+                      autoComplete="off"
                     />
                   </div>
                   <div className="space-y-2">
@@ -406,26 +501,30 @@ function ProjectsTable({
                       className="bg-[#1E293B] border-[#2D3748] text-white"
                       value={newTask.estimated_hours}
                       onChange={(e) => setNewTask({ ...newTask, estimated_hours: Number.parseFloat(e.target.value) })}
+                      autoComplete="off"
                     />
                   </div>
                 </div>
                 <DialogFooter>
-                  <Button
-                    variant="outline"
-                    onClick={() => setShowAddTask(false)}
-                    className="bg-transparent border-[#2D3748] text-white hover:bg-[#1E293B]"
-                  >
-                    Cancel
-                  </Button>
-                  <Button
-                    onClick={handleCreateTask}
-                    className="bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white"
-                    disabled={!newTask.name}
-                  >
-                    Create Task
-                  </Button>
+                  <DialogClose asChild>
+                    <Button
+                      variant="outline"
+                      className="bg-transparent border-[#2D3748] text-white hover:bg-[#1E293B]"
+                    >
+                      Cancel
+                    </Button>
+                  </DialogClose>
+                  <DialogClose asChild>
+                    <Button
+                      onClick={handleCreateTask}
+                      className="bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white"
+                      disabled={!newTask.name}
+                    >
+                      Create Task
+                    </Button>
+                  </DialogClose>
                 </DialogFooter>
-              </DialogContent>
+              </SimpleDialogContent>
             </Dialog>
           </div>
 
@@ -439,7 +538,7 @@ function ProjectsTable({
                 <ListTodo className="h-12 w-12 text-gray-500/50" />
                 <p>No tasks found for this project</p>
                 <Button
-                  onClick={() => setShowAddTask(true)}
+                  onClick={handleOpenTaskDialog}
                   className="bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white font-medium rounded-full px-6 py-2.5 mt-2"
                 >
                   <Plus className="mr-2 h-4 w-4" />
@@ -584,4 +683,3 @@ function ProjectsTable({
     </div>
   )
 }
-

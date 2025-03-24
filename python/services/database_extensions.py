@@ -31,9 +31,12 @@ def create_client(self, name: str, user_id: str, **kwargs) -> Dict[str, Any]:
         # Generate a UUID for the client
         client_id = str(uuid.uuid4())
         
+        # Get current timestamp for created_at and updated_at
+        current_time = datetime.now().isoformat()
+        
         # Prepare query and parameters
-        fields = ['id', 'name', 'user_id']
-        values = [client_id, name, user_id]
+        fields = ['id', 'name', 'user_id', 'created_at', 'updated_at']
+        values = [client_id, name, user_id, current_time, current_time]
         
         # Add optional fields
         optional_fields = [
@@ -45,6 +48,11 @@ def create_client(self, name: str, user_id: str, **kwargs) -> Dict[str, Any]:
                 fields.append(field)
                 values.append(kwargs[field])
         
+        # Set is_active to true by default
+        if 'is_active' not in fields:
+            fields.append('is_active')
+            values.append(1)  # 1 = True in SQLite
+            
         # Create placeholders for SQL query
         placeholders = ', '.join('?' for _ in range(len(fields)))
         fields_str = ', '.join(fields)
@@ -290,9 +298,12 @@ def create_project(self, name: str, user_id: str, **kwargs) -> Dict[str, Any]:
         # Generate a UUID for the project
         project_id = str(uuid.uuid4())
         
+        # Get current timestamp for created_at and updated_at
+        current_time = datetime.now().isoformat()
+        
         # Prepare query and parameters
-        fields = ['id', 'name', 'user_id']
-        values = [project_id, name, user_id]
+        fields = ['id', 'name', 'user_id', 'created_at', 'updated_at']
+        values = [project_id, name, user_id, current_time, current_time]
         
         # Add optional fields
         optional_fields = [
@@ -304,6 +315,15 @@ def create_project(self, name: str, user_id: str, **kwargs) -> Dict[str, Any]:
                 fields.append(field)
                 values.append(kwargs[field])
         
+        # Set is_active and is_billable to true by default
+        if 'is_active' not in fields:
+            fields.append('is_active')
+            values.append(1)  # 1 = True in SQLite
+            
+        if 'is_billable' not in fields:
+            fields.append('is_billable')
+            values.append(1)  # 1 = True in SQLite
+            
         # Create placeholders for SQL query
         placeholders = ', '.join('?' for _ in range(len(fields)))
         fields_str = ', '.join(fields)
@@ -555,9 +575,12 @@ def create_project_task(self, name: str, project_id: str, **kwargs) -> Dict[str,
         # Generate a UUID for the task
         task_id = str(uuid.uuid4())
         
+        # Get current timestamp for created_at and updated_at
+        current_time = datetime.now().isoformat()
+        
         # Prepare query and parameters
-        fields = ['id', 'name', 'project_id']
-        values = [task_id, name, project_id]
+        fields = ['id', 'name', 'project_id', 'created_at', 'updated_at']
+        values = [task_id, name, project_id, current_time, current_time]
         
         # Add optional fields
         optional_fields = ['description', 'estimated_hours']
@@ -567,6 +590,11 @@ def create_project_task(self, name: str, project_id: str, **kwargs) -> Dict[str,
                 fields.append(field)
                 values.append(kwargs[field])
         
+        # Set is_active to true by default
+        if 'is_active' not in fields:
+            fields.append('is_active')
+            values.append(1)  # 1 = True in SQLite
+            
         # Create placeholders for SQL query
         placeholders = ', '.join('?' for _ in range(len(fields)))
         fields_str = ', '.join(fields)
