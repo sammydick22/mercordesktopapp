@@ -5,7 +5,7 @@ import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
-import { Clock, LayoutDashboard, ImageIcon, Settings, BarChart, Folder, Users, ChevronRight } from "lucide-react"
+import { Clock, LayoutDashboard, ImageIcon, Settings, BarChart, Folder, Users, ChevronRight, Building2} from "lucide-react"
 import { useAuth } from "@/context/auth-context"
 import { motion } from "framer-motion"
 
@@ -47,6 +47,11 @@ export default function Sidebar() {
       name: "Clients",
       href: "/clients",
       icon: Users,
+    },
+    {
+      name: "Organizations",
+      href: "/organizations",
+      icon: Building2,
     },
     {
       name: "Settings",

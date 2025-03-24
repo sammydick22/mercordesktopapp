@@ -57,7 +57,7 @@ export function ClientsProvider({ children }: { children: ReactNode }) {
   const [lastFetchTime, setLastFetchTime] = useState<number>(0)
   const [fetchInProgress, setFetchInProgress] = useState<boolean>(false)
 
-  // Enhanced fetch function with improved retry logic
+  // Enhanced fetch function with global throttling, caching and retry logic
   const fetchClients = async (retryCount = 0, force = false) => {
     // If no user or no auth token yet, don't try to fetch
     const token = localStorage.getItem("auth_token");
@@ -66,22 +66,46 @@ export function ClientsProvider({ children }: { children: ReactNode }) {
       return;
     }
     
-    // Return immediately if:
-    // 1. A fetch is already in progress, OR
-    // 2. It's been less than 10 seconds since the last fetch AND force is false AND we have data
+    // GLOBAL THROTTLING: Use localStorage to share state between multiple component instances
     const now = Date.now();
-    const timeSinceLastFetch = now - lastFetchTime;
+    const globalLastFetchTime = parseInt(localStorage.getItem("clients_global_last_fetch") || "0");
+    const globalFetchInProgress = localStorage.getItem("clients_fetch_in_progress") === "true";
+    const timeSinceLastFetch = now - globalLastFetchTime;
     
-    if (fetchInProgress) {
-      console.log("Fetch already in progress, skipping");
+    // Use cached data from localStorage if available
+    const cachedData = localStorage.getItem("clients_cached_data");
+    if (cachedData && !force && clients.length === 0) {
+      try {
+        const parsed = JSON.parse(cachedData);
+        
+        // Check if we actually need to update state to avoid re-render loops
+        // Only set state if clients is empty and parsed data isn't
+        if (clients.length === 0 && parsed.length > 0) {
+          console.log("Using clients data from localStorage cache");
+          setClients(parsed);
+        } else {
+          console.log("Using cached data without state update");
+        }
+      } catch (e) {
+        console.error("Error parsing cached clients data:", e);
+      }
+    }
+    
+    // Return immediately if:
+    // 1. A fetch is already in progress globally, OR
+    // 2. It's been less than 30 seconds since the last fetch AND force is false AND we have data
+    if (globalFetchInProgress) {
+      console.log("Clients fetch already in progress globally, skipping");
       return;
     }
     
-    if (!force && timeSinceLastFetch < 10000 && clients.length > 0) {
-      console.log("Using cached clients data");
+    if (!force && timeSinceLastFetch < 30000 && (clients.length > 0 || cachedData)) {
+      console.log(`Using cached clients data (last fetch: ${timeSinceLastFetch/1000}s ago)`);
       return;
     }
     
+    // Set global in-progress flag
+    localStorage.setItem("clients_fetch_in_progress", "true");
     setFetchInProgress(true);
     setLoading(true);
     setError(null);
@@ -90,32 +114,47 @@ export function ClientsProvider({ children }: { children: ReactNode }) {
       console.log("Fetching clients...");
       const { data } = await clientsApi.getClients();
       console.log("Clients fetched:", data);
-      setLastFetchTime(Date.now());
+      
+      // Update global last fetch time
+      const fetchTime = Date.now();
+      localStorage.setItem("clients_global_last_fetch", fetchTime.toString());
+      setLastFetchTime(fetchTime);
       
       // Handle both possible response formats
+      let clientsData = [];
       if (data.clients) {
-        setClients(data.clients);
+        clientsData = data.clients;
       } else if (Array.isArray(data)) {
-        setClients(data);
+        clientsData = data;
       } else {
         console.warn("Unexpected clients response format:", data);
-        setClients([]);
+      }
+      
+      // Save to local state
+      setClients(clientsData);
+      
+      // Cache data in localStorage
+      try {
+        localStorage.setItem("clients_cached_data", JSON.stringify(clientsData));
+      } catch (e) {
+        console.warn("Failed to cache clients in localStorage:", e);
       }
     } catch (err: any) {
       console.error("Error fetching clients:", err);
       setError(err.response?.data?.message || "Failed to fetch clients");
       
       // Enhanced retry logic with increasing delays
-      if (retryCount < 5) { // Increase max retries from 3 to 5
-        // Calculate delay with exponential backoff (1s, 2s, 4s, 8s, 16s)
-        const delay = Math.min(1000 * Math.pow(2, retryCount), 16000);
-        console.log(`Retrying clients fetch (${retryCount + 1}/5) in ${delay}ms...`);
+      if (retryCount < 3) { // Reduced retry count
+        // Calculate delay with exponential backoff (1s, 2s, 4s)
+        const delay = Math.min(1000 * Math.pow(2, retryCount), 4000);
+        console.log(`Retrying clients fetch (${retryCount + 1}/3) in ${delay}ms...`);
         setTimeout(() => fetchClients(retryCount + 1, force), delay);
         return;
       }
     } finally {
       setLoading(false);
       setFetchInProgress(false);
+      localStorage.setItem("clients_fetch_in_progress", "false");
     }
   }
 
@@ -175,6 +214,13 @@ export function ClientsProvider({ children }: { children: ReactNode }) {
     }
   }
 
+  // Clear in-progress flag on unmount to prevent deadlocks
+  useEffect(() => {
+    return () => {
+      localStorage.setItem("clients_fetch_in_progress", "false");
+    };
+  }, []);
+
   // Initial fetch effect - only runs once on mount
   useEffect(() => {
     fetchClients()
@@ -190,24 +236,49 @@ export function ClientsProvider({ children }: { children: ReactNode }) {
       }
     };
     
-    // Listen for storage events (when token is added/removed in other tabs)
-    window.addEventListener('storage', handleStorageChange);
-    
-    // Also listen for the custom storage event we dispatch within the same window
-    window.addEventListener('storage', () => {
-      console.log("Internal storage event, checking clients");
-      const token = localStorage.getItem("auth_token");
-      if (token && clients.length === 0) {
-        console.log("Auth token available but no clients, fetching");
-        fetchClients(0, true);
+    // Listen for global fetch completed events
+    const handleFetchComplete = (event: StorageEvent) => {
+      if (event.key === "clients_global_last_fetch" && event.newValue) {
+        // Another instance has completed a fetch, we should check our local state
+        const cachedData = localStorage.getItem("clients_cached_data");
+        if (cachedData && clients.length === 0) {
+          try {
+            const parsedData = JSON.parse(cachedData);
+            // Only update state if there's actual data and our current state is empty
+            if (parsedData && parsedData.length > 0 && clients.length === 0) {
+              console.log("Another instance fetched data, updating local state");
+              setClients(parsedData);
+            }
+          } catch (e) {
+            console.error("Error parsing cached clients data:", e);
+          }
+        }
       }
-    });
+    };
+    
+    // Listen for storage events
+    window.addEventListener('storage', handleStorageChange);
+    window.addEventListener('storage', handleFetchComplete);
+    
+    // Check for cached data on mount if we have no clients
+    if (clients.length === 0) {
+      const cachedData = localStorage.getItem("clients_cached_data");
+      if (cachedData) {
+        try {
+          console.log("Loading clients from cache on mount");
+          setClients(JSON.parse(cachedData));
+        } catch (e) {
+          console.error("Error parsing cached clients data:", e);
+        }
+      }
+    }
     
     // Return cleanup function
     return () => {
       window.removeEventListener('storage', handleStorageChange);
+      window.removeEventListener('storage', handleFetchComplete);
     };
-  }, [clients.length]);
+  }, []);
   
   // Also fetch when user changes (after login/logout)
   useEffect(() => {

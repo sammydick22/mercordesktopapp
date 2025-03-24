@@ -29,6 +29,7 @@ import { cn } from "@/lib/utils"
 // React component to define DialogContent
 import * as React from "react"
 import * as DialogPrimitive from "@radix-ui/react-dialog"
+import * as DropdownMenuPrimitive from "@radix-ui/react-dropdown-menu"
 
 // Custom Dialog components with simplified animations
 const SimpleDialogOverlay = React.forwardRef<
@@ -71,6 +72,62 @@ const SimpleDialogContent = React.forwardRef<
 ))
 SimpleDialogContent.displayName = "SimpleDialogContent"
 
+// Complete set of custom Dropdown Menu components with simplified animations
+const SimpleDropdownMenu = DropdownMenuPrimitive.Root
+SimpleDropdownMenu.displayName = "SimpleDropdownMenu"
+
+const SimpleDropdownMenuTrigger = React.forwardRef<
+  React.ElementRef<typeof DropdownMenuPrimitive.Trigger>,
+  React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Trigger>
+>(({ className, ...props }, ref) => (
+  <DropdownMenuPrimitive.Trigger
+    ref={ref}
+    className={cn("outline-none", className)}
+    {...props}
+  />
+))
+SimpleDropdownMenuTrigger.displayName = "SimpleDropdownMenuTrigger"
+
+const SimpleDropdownMenuContent = React.forwardRef<
+  React.ElementRef<typeof DropdownMenuPrimitive.Content>,
+  React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Content>
+>(({ className, sideOffset = 4, ...props }, ref) => (
+  <DropdownMenuPrimitive.Portal>
+    <DropdownMenuPrimitive.Content
+      ref={ref}
+      sideOffset={sideOffset}
+      className={cn(
+        "z-50 min-w-[8rem] overflow-hidden rounded-md border p-1 shadow-md",
+        className
+      )}
+      style={{ 
+        opacity: 1,
+        pointerEvents: "auto",
+        transform: "translateY(0)",
+        transition: "none" 
+      }}
+      {...props}
+    />
+  </DropdownMenuPrimitive.Portal>
+))
+SimpleDropdownMenuContent.displayName = "SimpleDropdownMenuContent"
+
+const SimpleDropdownMenuItem = React.forwardRef<
+  React.ElementRef<typeof DropdownMenuPrimitive.Item>,
+  React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Item>
+>(({ className, ...props }, ref) => (
+  <DropdownMenuPrimitive.Item
+    ref={ref}
+    className={cn(
+      "relative flex cursor-pointer select-none items-center rounded-sm px-2 py-1.5 text-sm outline-none",
+      className
+    )}
+    style={{ pointerEvents: "auto" }}
+    {...props}
+  />
+))
+SimpleDropdownMenuItem.displayName = "SimpleDropdownMenuItem"
+
 export default function ClientsPage() {
   const { user, loading: authLoading } = useAuth()
   const {
@@ -103,20 +160,22 @@ export default function ClientsPage() {
     }
   }, [user, authLoading, router])
   
-  // Explicit fetch when the clients page loads
+  // Let the context handle the initial fetch with global throttling/caching
   useEffect(() => {
-    console.log("Clients page loaded - explicitly fetching clients data");
-    // Force immediate refresh of clients data
-    fetchClients();
+    console.log("Clients page loaded");
     
-    // Setup periodic refresh for long sessions
+    // The context itself will perform the initial fetch, no need to trigger it here
+    // This prevents multiple fetches when using React StrictMode
+    
+    // Only set up refresh for very long sessions
     const refreshInterval = setInterval(() => {
-      console.log("Periodic refresh of clients data");
+      // The context logic will decide if it should actually fetch or use cached data
+      // This won't trigger state updates unless needed
       fetchClients();
-    }, 30000); // Refresh every 30 seconds
+    }, 300000); // Every 5 minutes (increased from 30 seconds)
     
     return () => clearInterval(refreshInterval);
-  }, [fetchClients]);
+  }, [fetchClients]); // fetchClients is stable from context
 
   const filteredClients = clients.filter(
     (client) =>
@@ -439,36 +498,36 @@ function ClientsTable({
                   )}
                 </TableCell>
                 <TableCell>
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
+                  <SimpleDropdownMenu>
+                    <SimpleDropdownMenuTrigger asChild>
                       <Button variant="ghost" size="icon" className="h-8 w-8 p-0 hover:bg-[#2D3748]">
                         <MoreHorizontal className="h-4 w-4" />
                       </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end" className="bg-[#0F172A] border-[#1E293B]">
-                      <DropdownMenuItem className="hover:bg-[#1E293B] text-gray-300 hover:text-white">
+                    </SimpleDropdownMenuTrigger>
+                    <SimpleDropdownMenuContent align="end" className="bg-[#0F172A] border-[#1E293B]">
+                      <SimpleDropdownMenuItem className="hover:bg-[#1E293B] text-gray-300 hover:text-white">
                         <Edit className="mr-2 h-4 w-4" />
                         <span>Edit</span>
-                      </DropdownMenuItem>
+                      </SimpleDropdownMenuItem>
                       {client.is_active ? (
-                        <DropdownMenuItem
+                        <SimpleDropdownMenuItem
                           className="hover:bg-[#1E293B] text-amber-400 hover:text-amber-300"
                           onClick={() => onArchive(client.id)}
                         >
                           <Trash2 className="mr-2 h-4 w-4" />
                           <span>Archive</span>
-                        </DropdownMenuItem>
+                        </SimpleDropdownMenuItem>
                       ) : (
-                        <DropdownMenuItem
+                        <SimpleDropdownMenuItem
                           className="hover:bg-[#1E293B] text-red-400 hover:text-red-300"
                           onClick={() => onDelete(client.id)}
                         >
                           <Trash2 className="mr-2 h-4 w-4" />
                           <span>Delete</span>
-                        </DropdownMenuItem>
+                        </SimpleDropdownMenuItem>
                       )}
-                    </DropdownMenuContent>
-                  </DropdownMenu>
+                    </SimpleDropdownMenuContent>
+                  </SimpleDropdownMenu>
                 </TableCell>
               </TableRow>
             ))}

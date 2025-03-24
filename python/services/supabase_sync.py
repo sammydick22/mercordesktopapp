@@ -468,13 +468,6 @@ class SupabaseSyncService:
         Returns:
             str: Organization ID or None if not found
         """
-        # For testing: Return a test organization ID for the test user (test@gitawal.xyz)
-        if user_id == "3e597365-02f2-4bf5-9d54-d2bb50685d15":
-            # Use a proper UUID format for the test organization ID
-            test_org_id = "123e4567-e89b-12d3-a456-426614174000"
-            logger.info(f"Using test organization ID: {test_org_id}")
-            return test_org_id
-            
         if not self.supabase:
             logger.error("Supabase client not initialized")
             return None
@@ -483,24 +476,54 @@ class SupabaseSyncService:
             # First check local storage
             org_membership = self.db_service.get_user_org_membership(user_id)
             if org_membership:
+                logger.info(f"Found local organization membership for user {user_id}: {org_membership['org_id']}")
                 return org_membership["org_id"]
                 
             # If not found locally, fetch from Supabase
             try:
                 # Use Supabase client to get user's org memberships
+                logger.info(f"Fetching organization memberships for user {user_id} from Supabase")
                 result = self.supabase.table("org_members").select("*").eq("user_id", user_id).execute()
                 
                 if not result.data:
+                    logger.warning(f"No organization memberships found for user {user_id}")
                     return None
                     
                 memberships = result.data
-                # Store membership locally
+                logger.info(f"Found {len(memberships)} organization memberships in Supabase")
+                
+                # Get organization details for each membership
                 for membership in memberships:
-                    self.db_service.save_org_membership(membership)
+                    org_id = membership["org_id"]
                     
-                return memberships[0]["org_id"]
+                    # Get organization details from Supabase
+                    logger.info(f"Fetching organization {org_id} details from Supabase")
+                    org_result = self.supabase.table("organizations").select("*").eq("id", org_id).execute()
+                    
+                    if org_result.data and len(org_result.data) > 0:
+                        # Save organization to local database first
+                        org_data = org_result.data[0]
+                        logger.info(f"Saving organization {org_id} to local database")
+                        saved = self.db_service.save_organization_data(org_data)
+                        
+                        if not saved:
+                            logger.error(f"Failed to save organization {org_id} to local database")
+                            continue
+                        
+                        # Now save the membership
+                        logger.info(f"Saving membership for organization {org_id}")
+                        self.db_service.save_org_membership(membership)
+                    else:
+                        logger.warning(f"Organization {org_id} not found in Supabase")
+                
+                # Return the first valid organization ID
+                if memberships:
+                    logger.info(f"Using organization {memberships[0]['org_id']} for user {user_id}")
+                    return memberships[0]["org_id"]
+                    
+                return None
             except Exception as e:
-                logger.error(f"Error fetching org memberships: {str(e)}")
+                logger.error(f"Error fetching organization data: {str(e)}")
                 return None
                     
         except Exception as e:

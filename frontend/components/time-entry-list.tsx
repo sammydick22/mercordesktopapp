@@ -1,10 +1,69 @@
 "use client"
 import { Card, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
-import { formatDateTime, formatDuration } from "@/lib/utils"
+import { formatDateTime, formatDuration, cn } from "@/lib/utils"
 import { Clock, Edit, Trash2, Play, MoreHorizontal } from "lucide-react"
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { motion } from "framer-motion"
+
+// Import primitive components directly for custom dropdowns
+import * as React from "react"
+import * as DropdownMenuPrimitive from "@radix-ui/react-dropdown-menu"
+
+// Complete set of custom Dropdown Menu components with simplified animations
+const SimpleDropdownMenu = DropdownMenuPrimitive.Root
+SimpleDropdownMenu.displayName = "SimpleDropdownMenu"
+
+const SimpleDropdownMenuTrigger = React.forwardRef<
+  React.ElementRef<typeof DropdownMenuPrimitive.Trigger>,
+  React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Trigger>
+>(({ className, ...props }, ref) => (
+  <DropdownMenuPrimitive.Trigger
+    ref={ref}
+    className={cn("outline-none", className)}
+    {...props}
+  />
+))
+SimpleDropdownMenuTrigger.displayName = "SimpleDropdownMenuTrigger"
+
+const SimpleDropdownMenuContent = React.forwardRef<
+  React.ElementRef<typeof DropdownMenuPrimitive.Content>,
+  React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Content>
+>(({ className, sideOffset = 4, ...props }, ref) => (
+  <DropdownMenuPrimitive.Portal>
+    <DropdownMenuPrimitive.Content
+      ref={ref}
+      sideOffset={sideOffset}
+      className={cn(
+        "z-50 min-w-[8rem] overflow-hidden rounded-md border p-1 shadow-md",
+        className
+      )}
+      style={{ 
+        opacity: 1,
+        pointerEvents: "auto",
+        transform: "translateY(0)",
+        transition: "none" 
+      }}
+      {...props}
+    />
+  </DropdownMenuPrimitive.Portal>
+))
+SimpleDropdownMenuContent.displayName = "SimpleDropdownMenuContent"
+
+const SimpleDropdownMenuItem = React.forwardRef<
+  React.ElementRef<typeof DropdownMenuPrimitive.Item>,
+  React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Item>
+>(({ className, ...props }, ref) => (
+  <DropdownMenuPrimitive.Item
+    ref={ref}
+    className={cn(
+      "relative flex cursor-pointer select-none items-center rounded-sm px-2 py-1.5 text-sm outline-none",
+      className
+    )}
+    style={{ pointerEvents: "auto" }}
+    {...props}
+  />
+))
+SimpleDropdownMenuItem.displayName = "SimpleDropdownMenuItem"
 
 interface TimeEntry {
   id: string
@@ -87,23 +146,23 @@ function TimeEntryCard({ entry }: { entry: TimeEntry }) {
               {formatDuration(entry.duration || 0)}
             </div>
             <div className="flex space-x-1">
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
+              <SimpleDropdownMenu>
+                <SimpleDropdownMenuTrigger asChild>
                   <Button variant="ghost" size="icon" className="rounded-full h-8 w-8 hover:bg-[#2D3748]">
                     <MoreHorizontal className="h-4 w-4" />
                   </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="bg-[#0F172A] border-[#1E293B]">
-                  <DropdownMenuItem className="hover:bg-[#1E293B] text-gray-300 hover:text-white">
+                </SimpleDropdownMenuTrigger>
+                <SimpleDropdownMenuContent align="end" className="bg-[#0F172A] border-[#1E293B]">
+                  <SimpleDropdownMenuItem className="hover:bg-[#1E293B] text-gray-300 hover:text-white">
                     <Edit className="mr-2 h-4 w-4" />
                     <span>Edit</span>
-                  </DropdownMenuItem>
-                  <DropdownMenuItem className="hover:bg-[#1E293B] text-red-400 hover:text-red-300">
+                  </SimpleDropdownMenuItem>
+                  <SimpleDropdownMenuItem className="hover:bg-[#1E293B] text-red-400 hover:text-red-300">
                     <Trash2 className="mr-2 h-4 w-4" />
                     <span>Delete</span>
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
+                  </SimpleDropdownMenuItem>
+                </SimpleDropdownMenuContent>
+              </SimpleDropdownMenu>
             </div>
           </div>
         </div>
@@ -111,4 +170,3 @@ function TimeEntryCard({ entry }: { entry: TimeEntry }) {
     </Card>
   )
 }
-

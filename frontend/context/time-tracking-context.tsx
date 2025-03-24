@@ -2,6 +2,8 @@
 
 import { createContext, useContext, useState, useEffect, type ReactNode } from "react"
 import * as timeEntriesApi from "@/api/timeEntries"
+import { useSettings } from "@/context/settings-context"
+import { calculateElapsedTime } from "@/lib/timezone-utils"
 
 interface TimeEntry {
   id: string
@@ -24,22 +26,48 @@ interface TimeTrackingContextType {
   stopTimeEntry: (description?: string) => Promise<void>
   refreshCurrentEntry: () => Promise<void>
   loadRecentEntries: (limit?: number) => Promise<void>
+  localStartTime: string | null
 }
 
 const TimeTrackingContext = createContext<TimeTrackingContextType | undefined>(undefined)
 
 export function TimeTrackingProvider({ children }: { children: ReactNode }) {
+  const { profile } = useSettings()
   const [currentTimeEntry, setCurrentTimeEntry] = useState<TimeEntry | null>(null)
   const [recentEntries, setRecentEntries] = useState<TimeEntry[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [localStartTime, setLocalStartTime] = useState<string | null>(null)
 
   const refreshCurrentEntry = async () => {
     try {
-      const { data } = await timeEntriesApi.getCurrentTimeEntry()
-      setCurrentTimeEntry(data.time_entry || null)
+      console.log("[TIMER DEBUG] Fetching current time entry");
+      const { data } = await timeEntriesApi.getCurrentTimeEntry();
+      console.log("[TIMER DEBUG] Received current time entry:", data.time_entry);
+      
+      // If we got an active time entry from the server
+      if (data.time_entry && data.time_entry.is_active) {
+        // Store the local start time for continuity if we have one
+        // and only if this is our first time getting the server entry
+        if (localStartTime && (!currentTimeEntry || !currentTimeEntry.is_active)) {
+          console.log("[TIMER DEBUG] Preserving local start time for continuity:", localStartTime);
+          // Instead of clearing localStartTime, we keep it
+          // This ensures the elapsed time calculation remains consistent
+        } else {
+          // If this is a subsequent polling update, we can clear localStartTime
+          // as we'll be using the server timestamp fully now
+          console.log("[TIMER DEBUG] Already have server entry, can clear localStartTime");
+          setLocalStartTime(null);
+        }
+      } else if (!data.time_entry || !data.time_entry.is_active) {
+        // No active time entry, clear local start time
+        console.log("[TIMER DEBUG] No active time entry, clearing localStartTime");
+        setLocalStartTime(null);
+      }
+      
+      setCurrentTimeEntry(data.time_entry || null);
     } catch (err) {
-      console.error("Error fetching current time entry:", err)
+      console.error("[TIMER DEBUG] Error fetching current time entry:", err);
     }
   }
 
@@ -70,11 +98,18 @@ export function TimeTrackingProvider({ children }: { children: ReactNode }) {
   const startTimeEntry = async (projectId?: string, taskId?: string, description?: string) => {
     setLoading(true)
     setError(null)
+    
+    // Save the local start time immediately for optimistic updates
+    const now = new Date().toISOString();
+    setLocalStartTime(now);
+    
     try {
       const { data } = await timeEntriesApi.startTimeEntry(projectId, taskId, description)
       setCurrentTimeEntry(data.time_entry)
       await loadRecentEntries()
     } catch (err: any) {
+      // Clear the local start time if there's an error
+      setLocalStartTime(null);
       setError(err.response?.data?.message || "Failed to start time entry")
       throw err
     } finally {
@@ -110,6 +145,7 @@ export function TimeTrackingProvider({ children }: { children: ReactNode }) {
         stopTimeEntry,
         refreshCurrentEntry,
         loadRecentEntries,
+        localStartTime
       }}
     >
       {children}
@@ -124,4 +160,3 @@ export function useTimeTracking() {
   }
   return context
 }
-

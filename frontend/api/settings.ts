@@ -13,6 +13,9 @@ export const updateSettings = (data: {
   notifications_enabled?: boolean
 }) => apiClient.put("/settings", data)
 
+export const setActiveOrganization = (orgId: string) => 
+  apiClient.put("/settings/active-organization", { organization_id: orgId })
+
 export const getUserProfile = () => apiClient.get("/profile")
 
 export const updateUserProfile = (data: {

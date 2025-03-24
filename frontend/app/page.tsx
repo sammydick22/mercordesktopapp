@@ -1,10 +1,11 @@
 "use client"
 
-import { useEffect } from "react"
+import { useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
 import { useAuth } from "@/context/auth-context"
 import { useTimeTracking } from "@/context/time-tracking-context"
 import { useSync } from "@/context/sync-context"
+import * as screenshotsApi from "@/api/screenshots"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
@@ -19,6 +20,48 @@ export default function Dashboard() {
   const { currentTimeEntry, recentEntries, loadRecentEntries } = useTimeTracking()
   const { syncStatus, syncAll } = useSync()
   const router = useRouter()
+  const [screenshots, setScreenshots] = useState<any[]>([])
+  const [loadingScreenshots, setLoadingScreenshots] = useState(true)
+
+  // Function to determine if a timestamp is from today
+  const isToday = (timestamp: string) => {
+    const date = new Date(timestamp);
+    const today = new Date();
+    return date.getDate() === today.getDate() &&
+      date.getMonth() === today.getMonth() &&
+      date.getFullYear() === today.getFullYear();
+  };
+
+  // Get screenshots data
+  useEffect(() => {
+    const fetchScreenshots = async () => {
+      try {
+        setLoadingScreenshots(true);
+        const { data } = await screenshotsApi.getScreenshots(100, 0);
+        setScreenshots(data.screenshots || []);
+      } catch (err) {
+        console.error("Error fetching screenshots:", err);
+      } finally {
+        setLoadingScreenshots(false);
+      }
+    };
+
+    if (user) {
+      fetchScreenshots();
+    }
+  }, [user]);
+
+  // Handle capturing a new screenshot
+  const handleCaptureScreenshot = async () => {
+    try {
+      await screenshotsApi.captureScreenshot();
+      // Refresh screenshots
+      const { data } = await screenshotsApi.getScreenshots(100, 0);
+      setScreenshots(data.screenshots || []);
+    } catch (err) {
+      console.error("Error capturing screenshot:", err);
+    }
+  };
 
   useEffect(() => {
     if (!authLoading && !user) {
@@ -136,10 +179,23 @@ export default function Dashboard() {
           </CardHeader>
           <CardContent className="p-6 pt-0">
             <div className="flex flex-col gap-1">
-              <div className="text-2xl font-bold">0</div>
+              {loadingScreenshots ? (
+                <div className="text-2xl font-bold flex items-center">
+                  <RefreshCw className="h-4 w-4 mr-2 animate-spin text-blue-500" />
+                  Loading...
+                </div>
+              ) : (
+                <div className="text-2xl font-bold">
+                  {screenshots.filter(ss => isToday(ss.timestamp)).length}
+                </div>
+              )}
               <p className="text-xs text-gray-400">Captured today</p>
               <div className="mt-2">
-                <Button variant="link" className="p-0 h-auto text-xs text-blue-500 flex items-center gap-1">
+                <Button 
+                  variant="link" 
+                  className="p-0 h-auto text-xs text-blue-500 flex items-center gap-1"
+                  onClick={handleCaptureScreenshot}
+                >
                   Capture now
                   <ArrowUpRight size={12} />
                 </Button>
@@ -211,4 +267,3 @@ export default function Dashboard() {
     </div>
   )
 }
-

@@ -6,22 +6,43 @@ import { useState, useEffect } from "react"
 import { useRouter } from "next/navigation"
 import { useAuth } from "@/context/auth-context"
 import { useTimeTracking } from "@/context/time-tracking-context"
+import { useProjects } from "@/context/projects-context"
+import { useSettings } from "@/context/settings-context"
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { Play, Pause, Briefcase, ListTodo, Timer } from "lucide-react"
 import { formatDuration } from "@/lib/utils"
+import { calculateElapsedTime } from "@/lib/timezone-utils"
 import TimeEntryList from "@/components/time-entry-list"
 import { motion } from "framer-motion"
 
+interface Task {
+  id: string
+  project_id: string
+  name: string
+  description?: string
+  estimated_hours?: number
+  is_active: boolean
+  created_at: string
+  updated_at: string
+}
+
+// We're using the calculateElapsedTime function from timezone-utils.ts instead of a local helper
+
 export default function TimeTrackingPage() {
   const { user, loading: authLoading } = useAuth()
-  const { currentTimeEntry, recentEntries, startTimeEntry, stopTimeEntry, loading } = useTimeTracking()
+  const { currentTimeEntry, recentEntries, startTimeEntry, stopTimeEntry, loading, localStartTime } = useTimeTracking()
+  const { activeProjects, getProjectTasks } = useProjects()
+  const { profile } = useSettings()
   const [description, setDescription] = useState("")
   const [projectId, setProjectId] = useState<string | undefined>(undefined)
   const [taskId, setTaskId] = useState<string | undefined>(undefined)
+  const [projectTasks, setProjectTasks] = useState<Task[]>([])
+  const [loadingTasks, setLoadingTasks] = useState(false)
   const [elapsedTime, setElapsedTime] = useState(0)
+  const [optimisticTimer, setOptimisticTimer] = useState<number | null>(null)
   const router = useRouter()
 
   useEffect(() => {
@@ -33,40 +54,158 @@ export default function TimeTrackingPage() {
   useEffect(() => {
     if (currentTimeEntry) {
       setDescription(currentTimeEntry.description || "")
+      
+      // Set project and task from the current time entry if available
+      if (currentTimeEntry.project_id) {
+        setProjectId(currentTimeEntry.project_id)
+        
+        if (currentTimeEntry.task_id) {
+          setTaskId(currentTimeEntry.task_id)
+        }
+      }
     }
   }, [currentTimeEntry])
 
+  // Load tasks when project changes
+  useEffect(() => {
+    if (projectId) {
+      setLoadingTasks(true)
+      const loadTasks = async () => {
+        try {
+          const tasks = await getProjectTasks(projectId)
+          setProjectTasks(tasks.filter(task => task.is_active))
+        } catch (err) {
+          console.error("Error loading tasks:", err)
+          setProjectTasks([])
+        } finally {
+          setLoadingTasks(false)
+        }
+      }
+      loadTasks()
+    } else {
+      setProjectTasks([])
+    }
+  }, [projectId, getProjectTasks])
+
+  // Reset task selection when project changes
+  useEffect(() => {
+    setTaskId(undefined)
+  }, [projectId])
+
+  // Timer effect for tracking elapsed time
   useEffect(() => {
     let interval: NodeJS.Timeout | null = null
+    
+    console.log("[TIMER DEBUG] Timer effect in page.tsx - triggered with:", {
+      currentTimeEntry: currentTimeEntry ? {
+        id: currentTimeEntry.id,
+        is_active: currentTimeEntry.is_active,
+        start_time: currentTimeEntry.start_time
+      } : null,
+      localStartTime,
+      optimisticTimer,
+      profileTimezone: profile?.timezone
+    });
 
-    if (currentTimeEntry?.is_active) {
-      const startTime = new Date(currentTimeEntry.start_time).getTime()
+    // For tracking/debugging how long we've been timing
+    const manualElapsed = optimisticTimer !== null ? optimisticTimer : 0;
 
+    // Priority 1: Use localStartTime if we have it and we're in the transition period
+    // This ensures continuity between optimistic updates and server-confirmed updates
+    if (localStartTime) {
+      console.log("[TIMER DEBUG] Using localStartTime for consistent timing:", localStartTime);
+      
+      // This handles both the initial optimistic period and the transition to server state
       interval = setInterval(() => {
-        const now = Date.now()
-        const duration = Math.floor((now - startTime) / 1000)
-        setElapsedTime(duration)
-      }, 1000)
+        const elapsed = calculateElapsedTime(localStartTime, profile?.timezone);
+        console.log("[TIMER DEBUG] Local time interval - elapsed:", elapsed);
+        setElapsedTime(elapsed);
+      }, 1000);
+      
+      // Set initial elapsed time immediately
+      const initialLocalElapsed = calculateElapsedTime(localStartTime, profile?.timezone);
+      console.log("[TIMER DEBUG] Initial local elapsed time:", initialLocalElapsed);
+      setElapsedTime(initialLocalElapsed);
+    }
+    // Priority 2: Use server time entry if we have one
+    else if (currentTimeEntry?.is_active && currentTimeEntry.start_time) {
+      console.log("[TIMER DEBUG] Using server time entry - start_time:", currentTimeEntry.start_time);
+      
+      // Clear any remaining optimistic UI state since we're fully on server state now
+      setOptimisticTimer(null);
+      
+      // Start interval to update the elapsed time
+      interval = setInterval(() => {
+        const elapsed = calculateElapsedTime(currentTimeEntry.start_time, profile?.timezone);
+        console.log("[TIMER DEBUG] Server time interval - elapsed:", elapsed, "Manual count:", manualElapsed + 1);
+        setElapsedTime(elapsed);
+      }, 1000);
+      
+      // Set initial elapsed time immediately
+      const initialElapsed = calculateElapsedTime(currentTimeEntry.start_time, profile?.timezone);
+      console.log("[TIMER DEBUG] Initial server elapsed time:", initialElapsed);
+      setElapsedTime(initialElapsed);
+    } 
+    // Priority 3: Handle completed time entries
+    else if (currentTimeEntry && !currentTimeEntry.is_active) {
+      console.log("[TIMER DEBUG] Inactive time entry - duration:", currentTimeEntry.duration);
+      setElapsedTime(currentTimeEntry.duration || 0);
+      setOptimisticTimer(null);
+    }
+    // Priority 4: Use component-level optimistic timer as last resort
+    else if (optimisticTimer !== null) {
+      console.log("[TIMER DEBUG] Using component optimistic timer:", optimisticTimer);
+      
+      interval = setInterval(() => {
+        setOptimisticTimer(prev => {
+          const newValue = prev !== null ? prev + 1 : null;
+          console.log("[TIMER DEBUG] Optimistic timer update:", newValue);
+          return newValue;
+        });
+      }, 1000);
     } else {
-      setElapsedTime(currentTimeEntry?.duration || 0)
+      console.log("[TIMER DEBUG] No active timer condition matched");
     }
 
     return () => {
-      if (interval) clearInterval(interval)
+      if (interval) {
+        console.log("[TIMER DEBUG] Clearing interval");
+        clearInterval(interval);
+      }
     }
-  }, [currentTimeEntry])
+  }, [currentTimeEntry, localStartTime, optimisticTimer, profile?.timezone])
 
   const handleStartTracking = async () => {
-    await startTimeEntry(projectId, taskId, description)
+    // Set optimistic timer immediately for better UX
+    setOptimisticTimer(0)
+    console.log("[TIMER DEBUG] Page - Start button clicked, setting optimistic timer and calling API");
+    
+    try {
+      await startTimeEntry(projectId, taskId, description)
+      // Once startTimeEntry succeeds, we should clear the optimistic timer
+      // since we'll be getting a real server entry soon
+      setOptimisticTimer(null)
+    } catch (error) {
+      // If there's an error, clear the optimistic timer
+      setOptimisticTimer(null)
+      console.error("Failed to start time tracking:", error)
+    }
   }
 
   const handleStopTracking = async () => {
-    await stopTimeEntry(description)
+    try {
+      await stopTimeEntry(description)
+    } catch (error) {
+      console.error("Failed to stop time tracking:", error)
+    }
   }
 
   const handleDescriptionChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setDescription(e.target.value)
   }
+
+  // Determine which timer value to display
+  const displayTime = optimisticTimer !== null ? optimisticTimer : elapsedTime
 
   if (authLoading || !user) {
     return (
@@ -109,7 +248,7 @@ export default function TimeTrackingPage() {
             <CardContent className="p-6 pt-0 space-y-6">
               <div className="flex items-center justify-center">
                 <div className="font-mono text-7xl font-bold tabular-nums text-transparent bg-clip-text bg-gradient-to-r from-blue-500 to-purple-600">
-                  {formatDuration(elapsedTime)}
+                  {formatDuration(displayTime)}
                 </div>
               </div>
 
@@ -125,12 +264,18 @@ export default function TimeTrackingPage() {
                       className="flex h-10 w-full rounded-md border px-3 py-2 text-base ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 md:text-sm bg-[#1E293B] border-[#2D3748] text-white"
                       value={projectId || ""}
                       onChange={(e) => setProjectId(e.target.value === "" ? undefined : e.target.value)}
-                      disabled={currentTimeEntry?.is_active}
+                      disabled={currentTimeEntry?.is_active || optimisticTimer !== null}
                     >
                       <option value="" className="text-gray-400">Select project</option>
-                      <option value="project1" className="text-white">Project 1</option>
-                      <option value="project2" className="text-white">Project 2</option>
-                      <option value="project3" className="text-white">Project 3</option>
+                      {activeProjects.length === 0 ? (
+                        <option value="" disabled className="text-gray-400">No projects available</option>
+                      ) : (
+                        activeProjects.map((project) => (
+                          <option key={project.id} value={project.id} className="text-white">
+                            {project.name}
+                          </option>
+                        ))
+                      )}
                     </select>
                   </div>
 
@@ -144,12 +289,24 @@ export default function TimeTrackingPage() {
                       className="flex h-10 w-full rounded-md border px-3 py-2 text-base ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 md:text-sm bg-[#1E293B] border-[#2D3748] text-white"
                       value={taskId || ""}
                       onChange={(e) => setTaskId(e.target.value === "" ? undefined : e.target.value)}
-                      disabled={currentTimeEntry?.is_active}
+                      disabled={currentTimeEntry?.is_active || !projectId || loadingTasks || optimisticTimer !== null}
                     >
-                      <option value="" className="text-gray-400">Select task</option>
-                      <option value="task1" className="text-white">Task 1</option>
-                      <option value="task2" className="text-white">Task 2</option>
-                      <option value="task3" className="text-white">Task 3</option>
+                      {loadingTasks ? (
+                        <option value="" className="text-gray-400">Loading tasks...</option>
+                      ) : !projectId ? (
+                        <option value="" className="text-gray-400">Select a project first</option>
+                      ) : projectTasks.length === 0 ? (
+                        <option value="" className="text-gray-400">No tasks available</option>
+                      ) : (
+                        <>
+                          <option value="" className="text-gray-400">Select task</option>
+                          {projectTasks.map((task) => (
+                            <option key={task.id} value={task.id} className="text-white">
+                              {task.name}
+                            </option>
+                          ))}
+                        </>
+                      )}
                     </select>
                   </div>
                 </div>
@@ -170,12 +327,12 @@ export default function TimeTrackingPage() {
               </div>
             </CardContent>
             <CardFooter className="flex items-center p-6 pt-0 justify-center">
-              {currentTimeEntry?.is_active ? (
+              {currentTimeEntry?.is_active || optimisticTimer !== null ? (
                 <Button
                   variant="destructive"
                   size="lg"
                   onClick={handleStopTracking}
-                  disabled={loading}
+                  disabled={loading || optimisticTimer !== null}
                   className="bg-red-600 hover:bg-red-700 text-white font-medium rounded-full px-6 py-2.5 w-full max-w-md"
                 >
                   <Pause className="mr-2 h-4 w-4" />

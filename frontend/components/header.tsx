@@ -3,6 +3,7 @@
 import { useAuth } from "@/context/auth-context"
 import { useTimeTracking } from "@/context/time-tracking-context"
 import { useSync } from "@/context/sync-context"
+import { useSettings } from "@/context/settings-context"
 import { Button } from "@/components/ui/button"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import {
@@ -15,37 +16,104 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { Play, Pause, RefreshCw, AlertCircle, Bell, Moon, Sun, User, LogOut } from "lucide-react"
 import { formatDuration } from "@/lib/utils"
+import { calculateElapsedTime } from "@/lib/timezone-utils"
 import { useEffect, useState } from "react"
 import { cn } from "@/lib/utils"
 import { usePathname } from "next/navigation"
 
 export default function Header() {
   const { user, logout } = useAuth()
-  const { currentTimeEntry, startTimeEntry, stopTimeEntry } = useTimeTracking()
+  const { currentTimeEntry, startTimeEntry, stopTimeEntry, localStartTime } = useTimeTracking()
   const { syncStatus, syncAll } = useSync()
+  const { profile } = useSettings()
   const [elapsedTime, setElapsedTime] = useState(0)
+  const [optimisticTimer, setOptimisticTimer] = useState<number | null>(null)
   const [isDark, setIsDark] = useState(true)
   const pathname = usePathname()
 
   useEffect(() => {
     let interval: NodeJS.Timeout | null = null
 
-    if (currentTimeEntry?.is_active) {
-      const startTime = new Date(currentTimeEntry.start_time).getTime()
+    console.log("[TIMER DEBUG] Header timer effect triggered with:", {
+      currentTimeEntry: currentTimeEntry ? {
+        id: currentTimeEntry.id,
+        is_active: currentTimeEntry.is_active,
+        start_time: currentTimeEntry.start_time
+      } : null,
+      localStartTime,
+      optimisticTimer,
+      profileTimezone: profile?.timezone
+    });
 
+    // For tracking/debugging purposes
+    const manualElapsed = optimisticTimer !== null ? optimisticTimer : 0;
+    
+    // Priority 1: Use localStartTime if available for consistency during transitions
+    if (localStartTime) {
+      console.log("[TIMER DEBUG] Header - Using localStartTime for consistent timing:", localStartTime);
+      
+      // Clear component-level optimistic timer since we're using the context-level localStartTime
+      setOptimisticTimer(null);
+      
+      // Start interval using the reliable localStartTime
       interval = setInterval(() => {
-        const now = Date.now()
-        const duration = Math.floor((now - startTime) / 1000)
-        setElapsedTime(duration)
-      }, 1000)
+        const elapsed = calculateElapsedTime(localStartTime, profile?.timezone);
+        console.log("[TIMER DEBUG] Header local time interval - elapsed:", elapsed);
+        setElapsedTime(elapsed);
+      }, 1000);
+      
+      // Set initial elapsed time immediately
+      const initialLocalElapsed = calculateElapsedTime(localStartTime, profile?.timezone);
+      console.log("[TIMER DEBUG] Header initial local elapsed time:", initialLocalElapsed);
+      setElapsedTime(initialLocalElapsed);
+    }
+    // Priority 2: Use server time entry when available
+    else if (currentTimeEntry?.is_active && currentTimeEntry.start_time) {
+      console.log("[TIMER DEBUG] Header - Using server time entry:", currentTimeEntry.start_time);
+      
+      // Clear any optimistic timer
+      setOptimisticTimer(null);
+      
+      // Start interval to update the elapsed time
+      interval = setInterval(() => {
+        const elapsed = calculateElapsedTime(currentTimeEntry.start_time, profile?.timezone);
+        console.log("[TIMER DEBUG] Header server interval - elapsed:", elapsed, "Manual count:", manualElapsed + 1);
+        setElapsedTime(elapsed);
+      }, 1000);
+      
+      // Set initial elapsed time immediately
+      const initialElapsed = calculateElapsedTime(currentTimeEntry.start_time, profile?.timezone);
+      console.log("[TIMER DEBUG] Header initial server elapsed time:", initialElapsed);
+      setElapsedTime(initialElapsed);
+    } 
+    // Priority 3: Handle completed time entries
+    else if (currentTimeEntry && !currentTimeEntry.is_active) {
+      console.log("[TIMER DEBUG] Header - Inactive time entry - duration:", currentTimeEntry.duration);
+      setElapsedTime(currentTimeEntry.duration || 0);
+      setOptimisticTimer(null);
+    }
+    // Priority 4: Use component-level optimistic timer as last resort
+    else if (optimisticTimer !== null) {
+      console.log("[TIMER DEBUG] Header - Using component optimistic timer:", optimisticTimer);
+      
+      interval = setInterval(() => {
+        setOptimisticTimer(prev => {
+          const newValue = prev !== null ? prev + 1 : null;
+          console.log("[TIMER DEBUG] Header optimistic timer update:", newValue);
+          return newValue;
+        });
+      }, 1000);
     } else {
-      setElapsedTime(currentTimeEntry?.duration || 0)
+      console.log("[TIMER DEBUG] Header - No timer conditions matched");
     }
 
     return () => {
-      if (interval) clearInterval(interval)
+      if (interval) {
+        console.log("[TIMER DEBUG] Header - Clearing interval");
+        clearInterval(interval);
+      }
     }
-  }, [currentTimeEntry])
+  }, [currentTimeEntry, optimisticTimer, localStartTime, profile?.timezone])
 
   const toggleTheme = () => {
     const html = document.querySelector("html")
@@ -64,25 +132,32 @@ export default function Header() {
     <header className="bg-[#0F172A] border-b border-[#1E293B] p-4">
       <div className="flex items-center justify-between">
         <div className="flex items-center space-x-4">
-          {currentTimeEntry?.is_active ? (
+          {currentTimeEntry?.is_active || optimisticTimer !== null || localStartTime ? (
             <>
               <Button
                 onClick={() => stopTimeEntry()}
+                disabled={optimisticTimer !== null && !currentTimeEntry?.is_active}
                 className="bg-red-600 hover:bg-red-700 text-white font-medium rounded-full px-6 py-2.5 flex items-center gap-2"
               >
                 <Pause size={16} />
                 Stop
               </Button>
               <div className="font-mono text-6xl font-bold tabular-nums text-transparent bg-clip-text bg-gradient-to-r from-blue-500 to-purple-600">
-                {formatDuration(elapsedTime)}
+                {formatDuration(optimisticTimer !== null ? optimisticTimer : elapsedTime)}
               </div>
               <div className="text-sm text-gray-400 max-w-md truncate">
-                {currentTimeEntry.description || "No description"}
+                {currentTimeEntry?.description || "No description"}
               </div>
             </>
           ) : (
             <Button
-              onClick={() => startTimeEntry()}
+              onClick={() => {
+                // Set optimistic timer immediately
+                setOptimisticTimer(0);
+                console.log("[TIMER DEBUG] Header - Start button clicked, setting optimistic timer");
+                // Then call the API
+                startTimeEntry();
+              }}
               className="bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white font-medium rounded-full px-6 py-2.5 flex items-center gap-2"
             >
               <Play size={16} />
@@ -158,4 +233,3 @@ export default function Header() {
     </header>
   )
 }
-

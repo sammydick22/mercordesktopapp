@@ -28,7 +28,8 @@ default_settings = {
     "auto_sync_interval": 300,  # 5 minutes
     "idle_detection_timeout": 300,  # 5 minutes
     "theme": "system",
-    "notifications_enabled": True
+    "notifications_enabled": True,
+    "active_organization_id": None
 }
 
 # Initialize database tables if needed
@@ -47,11 +48,20 @@ def initialize_db():
             idle_detection_timeout INTEGER NOT NULL DEFAULT 300,
             theme TEXT NOT NULL DEFAULT 'system',
             notifications_enabled BOOLEAN NOT NULL DEFAULT 1,
+            active_organization_id TEXT,
             synced BOOLEAN NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
         ''')
+        
+        # Check if active_organization_id column exists, add it if not
+        try:
+            cursor.execute("SELECT active_organization_id FROM user_settings LIMIT 1")
+        except:
+            logger.info("Adding active_organization_id column to user_settings table")
+            cursor.execute("ALTER TABLE user_settings ADD COLUMN active_organization_id TEXT")
+            conn.commit()
         
         # Create user_profiles table if it doesn't exist
         cursor.execute('''
@@ -212,7 +222,7 @@ async def get_settings(
             '''
             SELECT 
                 screenshot_interval, screenshot_quality, auto_sync_interval,
-                idle_detection_timeout, theme, notifications_enabled
+                idle_detection_timeout, theme, notifications_enabled, active_organization_id
             FROM user_settings 
             WHERE user_id = ?
             ''',
@@ -224,11 +234,14 @@ async def get_settings(
         # Convert to dictionary
         column_names = [
             'screenshot_interval', 'screenshot_quality', 'auto_sync_interval',
-            'idle_detection_timeout', 'theme', 'notifications_enabled'
+            'idle_detection_timeout', 'theme', 'notifications_enabled', 'active_organization_id'
         ]
         
         settings = {
-            column_names[i]: row[i] if i != 5 else bool(row[i])  # Convert notifications_enabled to boolean
+            column_names[i]: (
+                bool(row[i]) if i == 5  # Convert notifications_enabled to boolean
+                else row[i]
+            )
             for i in range(len(column_names))
         }
         
@@ -456,3 +469,69 @@ async def update_profile(
     except Exception as e:
         logger.error(f"Error updating profile: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to update profile: {str(e)}")
+
+@router.put("/settings/active-organization")
+async def set_active_organization(
+    data: Dict[str, Any],
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Set the active organization for the current user.
+    
+    Args:
+        data: Data containing organization_id
+        
+    Returns:
+        Success message with the active organization ID
+    """
+    try:
+        user_id = current_user.get("id")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="User ID not found")
+            
+        organization_id = data.get("organization_id")
+        if not organization_id:
+            raise HTTPException(status_code=400, detail="organization_id is required")
+            
+        # Verify the organization exists and user is a member
+        conn = db_service._get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute(
+            '''
+            SELECT COUNT(*) FROM org_members
+            WHERE org_id = ? AND user_id = ?
+            ''',
+            (organization_id, user_id)
+        )
+        
+        count = cursor.fetchone()[0]
+        if count == 0:
+            raise HTTPException(status_code=403, detail="User is not a member of this organization")
+            
+        # First ensure settings exist for this user by calling get_settings
+        await get_settings(current_user)
+        
+        # Update the active organization
+        timestamp = datetime.now().isoformat()
+        cursor.execute(
+            '''
+            UPDATE user_settings
+            SET active_organization_id = ?, updated_at = ?
+            WHERE user_id = ?
+            ''',
+            (organization_id, timestamp, user_id)
+        )
+        
+        conn.commit()
+        
+        return {
+            "message": "Active organization updated",
+            "organization_id": organization_id
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error setting active organization: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to set active organization: {str(e)}")

@@ -140,11 +140,11 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     // Only fetch settings and profile when we have a user logged in
     const token = localStorage.getItem("auth_token")
     if (token) {
-      console.log("Auth token found, fetching settings and profile")
+      console.log("[TIMER DEBUG] Settings context - Auth token found, fetching settings and profile")
       fetchSettings()
       fetchProfile()
     } else {
-      console.log("No auth token found, skipping settings fetch")
+      console.log("[TIMER DEBUG] Settings context - No auth token found, skipping settings fetch")
     }
   }, [])
 
