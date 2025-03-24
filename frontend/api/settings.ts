@@ -2,6 +2,8 @@ import apiClient from "./client"
 
 export const getSettings = () => apiClient.get("/settings")
 
+export const resetSettings = () => apiClient.get("/settings/reset")
+
 export const updateSettings = (data: {
   screenshot_interval?: number
   screenshot_quality?: "low" | "medium" | "high"
@@ -25,4 +27,3 @@ export const changePassword = (data: {
   current_password: string
   new_password: string
 }) => apiClient.post("/auth/change-password", data)
-

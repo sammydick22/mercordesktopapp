@@ -39,9 +39,22 @@ async def list_clients(
     Returns:
         List of clients
     """
-    # Get clients from database
-    result = db_service.get_clients(limit, offset)
+    # Get user ID from current user
+    user_id = current_user.get('id')
+    if not user_id:
+        raise HTTPException(status_code=400, detail="User ID is required")
+        
+    # Get clients from database with user_id filter
+    result = db_service.get_clients(limit, offset, user_id=user_id)
     
+    # When using database_extensions.py, we need to wrap the result in proper format
+    if isinstance(result, list):
+        return {
+            "total": len(result),
+            "clients": result
+        }
+    
+    # When using database.py, the result is already in the correct format
     return result
 
 @router.get("/{client_id}")
@@ -93,8 +106,7 @@ async def create_client(
     # Create a copy of client data without the 'name' key to avoid duplicate argument
     client_data = {k: v for k, v in client.items() if k != 'name'}
     
-    # Create client in database
-    # Pass name and user_id as positional arguments and the rest as kwargs
+    # Call create_client with name as first argument, user_id as second, and remaining data as kwargs
     new_client = db_service.create_client(name, user_id, **client_data)
     
     if not new_client:

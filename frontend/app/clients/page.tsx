@@ -85,6 +85,7 @@ export default function ClientsPage() {
   } = useClients()
   const [searchQuery, setSearchQuery] = useState("")
   const [showAddClient, setShowAddClient] = useState(false)
+  const [loading, setLoading] = useState(false)
   const [newClient, setNewClient] = useState({
     name: "",
     contact_name: "",
@@ -95,11 +96,27 @@ export default function ClientsPage() {
   })
   const router = useRouter()
 
+  // Check authentication 
   useEffect(() => {
     if (!authLoading && !user) {
       router.push("/login")
     }
   }, [user, authLoading, router])
+  
+  // Explicit fetch when the clients page loads
+  useEffect(() => {
+    console.log("Clients page loaded - explicitly fetching clients data");
+    // Force immediate refresh of clients data
+    fetchClients();
+    
+    // Setup periodic refresh for long sessions
+    const refreshInterval = setInterval(() => {
+      console.log("Periodic refresh of clients data");
+      fetchClients();
+    }, 30000); // Refresh every 30 seconds
+    
+    return () => clearInterval(refreshInterval);
+  }, [fetchClients]);
 
   const filteredClients = clients.filter(
     (client) =>
@@ -118,7 +135,14 @@ export default function ClientsPage() {
 
   const handleCreateClient = useCallback(async () => {
     try {
-      await createClient(newClient)
+      // Show loading state
+      setLoading(true)
+      
+      // Create client
+      const client = await createClient(newClient)
+      console.log("Client created successfully:", client)
+      
+      // Reset form
       setShowAddClient(false)
       setNewClient({
         name: "",
@@ -129,14 +153,15 @@ export default function ClientsPage() {
         notes: "",
       })
       
-      // Add a slight delay before fetching clients to ensure database has completed the operation
-      setTimeout(() => {
-        fetchClients()
-      }, 500)
+      // Explicitly fetch all clients to ensure we have the complete list
+      await fetchClients()
+      
     } catch (err) {
       console.error("Error creating client:", err)
+    } finally {
+      setLoading(false)
     }
-  }, [createClient, newClient, fetchClients])
+  }, [createClient, newClient, fetchClients, setLoading])
 
   const handleArchiveClient = useCallback(
     async (clientId: string) => {

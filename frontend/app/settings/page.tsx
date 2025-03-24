@@ -21,7 +21,7 @@ import { motion } from "framer-motion"
 
 export default function SettingsPage() {
   const { user, loading: authLoading } = useAuth()
-  const { profile, settings, loading, error, updateSettings, updateProfile, changePassword } = useSettings()
+  const { profile, settings, loading, error, updateSettings, updateProfile, changePassword, resetSettings } = useSettings()
   const [activeTab, setActiveTab] = useState("profile")
   const [formProfile, setFormProfile] = useState({
     name: "",
@@ -250,40 +250,22 @@ export default function SettingsPage() {
 
                   <div className="space-y-2">
                     <Label htmlFor="timezone">Timezone</Label>
-                    <Select
+                    <select
+                      id="timezone"
+                      className="flex h-10 w-full rounded-md border px-3 py-2 text-base ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 md:text-sm bg-[#1E293B] border-[#2D3748] text-white"
                       value={formProfile.timezone}
-                      onValueChange={(value) => setFormProfile({ ...formProfile, timezone: value })}
+                      onChange={(e) => setFormProfile({ ...formProfile, timezone: e.target.value })}
                     >
-                      <SelectTrigger id="timezone" className="bg-[#1E293B] border-[#2D3748] text-white">
-                        <SelectValue placeholder="Select timezone" />
-                      </SelectTrigger>
-                      <SelectContent className="bg-[#0F172A] border-[#1E293B]">
-                        <SelectItem value="UTC" className="text-white hover:bg-[#1E293B]">
-                          UTC
-                        </SelectItem>
-                        <SelectItem value="America/New_York" className="text-white hover:bg-[#1E293B]">
-                          Eastern Time (ET)
-                        </SelectItem>
-                        <SelectItem value="America/Chicago" className="text-white hover:bg-[#1E293B]">
-                          Central Time (CT)
-                        </SelectItem>
-                        <SelectItem value="America/Denver" className="text-white hover:bg-[#1E293B]">
-                          Mountain Time (MT)
-                        </SelectItem>
-                        <SelectItem value="America/Los_Angeles" className="text-white hover:bg-[#1E293B]">
-                          Pacific Time (PT)
-                        </SelectItem>
-                        <SelectItem value="Europe/London" className="text-white hover:bg-[#1E293B]">
-                          London (GMT)
-                        </SelectItem>
-                        <SelectItem value="Europe/Paris" className="text-white hover:bg-[#1E293B]">
-                          Paris (CET)
-                        </SelectItem>
-                        <SelectItem value="Asia/Tokyo" className="text-white hover:bg-[#1E293B]">
-                          Tokyo (JST)
-                        </SelectItem>
-                      </SelectContent>
-                    </Select>
+                      <option value="" className="text-gray-400">Select timezone</option>
+                      <option value="UTC" className="text-white">UTC</option>
+                      <option value="America/New_York" className="text-white">Eastern Time (ET)</option>
+                      <option value="America/Chicago" className="text-white">Central Time (CT)</option>
+                      <option value="America/Denver" className="text-white">Mountain Time (MT)</option>
+                      <option value="America/Los_Angeles" className="text-white">Pacific Time (PT)</option>
+                      <option value="Europe/London" className="text-white">London (GMT)</option>
+                      <option value="Europe/Paris" className="text-white">Paris (CET)</option>
+                      <option value="Asia/Tokyo" className="text-white">Tokyo (JST)</option>
+                    </select>
                   </div>
 
                   <div className="space-y-2">
@@ -470,27 +452,16 @@ export default function SettingsPage() {
 
                     <div className="space-y-2">
                       <Label htmlFor="screenshot_quality">Screenshot Quality</Label>
-                      <Select
+                      <select
+                        id="screenshot_quality"
+                        className="flex h-10 w-full rounded-md border px-3 py-2 text-base ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 md:text-sm bg-[#1E293B] border-[#2D3748] text-white"
                         value={formSettings.screenshot_quality}
-                        onValueChange={(value: "low" | "medium" | "high") =>
-                          setFormSettings({ ...formSettings, screenshot_quality: value })
-                        }
+                        onChange={(e) => setFormSettings({ ...formSettings, screenshot_quality: e.target.value as "low" | "medium" | "high" })}
                       >
-                        <SelectTrigger id="screenshot_quality" className="bg-[#1E293B] border-[#2D3748] text-white">
-                          <SelectValue placeholder="Select quality" />
-                        </SelectTrigger>
-                        <SelectContent className="bg-[#0F172A] border-[#1E293B]">
-                          <SelectItem value="low" className="text-white hover:bg-[#1E293B]">
-                            Low (smaller file size)
-                          </SelectItem>
-                          <SelectItem value="medium" className="text-white hover:bg-[#1E293B]">
-                            Medium (balanced)
-                          </SelectItem>
-                          <SelectItem value="high" className="text-white hover:bg-[#1E293B]">
-                            High (better quality)
-                          </SelectItem>
-                        </SelectContent>
-                      </Select>
+                        <option value="low" className="text-white">Low (smaller file size)</option>
+                        <option value="medium" className="text-white">Medium (balanced)</option>
+                        <option value="high" className="text-white">High (better quality)</option>
+                      </select>
                     </div>
                   </div>
 
@@ -518,13 +489,28 @@ export default function SettingsPage() {
                   </div>
                 </div>
 
-                <Button
-                  type="submit"
-                  className="bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white font-medium rounded-full px-6 py-2.5"
-                >
-                  <Save className="mr-2 h-4 w-4" />
-                  Save Settings
-                </Button>
+                <div className="flex justify-between">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="bg-transparent border-[#2D3748] text-white hover:bg-[#1E293B]"
+                    onClick={() => {
+                      resetSettings()
+                        .then(() => setSuccessMessage("Settings reset to defaults successfully"))
+                        .catch((err) => console.error("Error resetting settings:", err));
+                    }}
+                  >
+                    <RefreshCw className="mr-2 h-4 w-4" />
+                    Reset to Defaults
+                  </Button>
+                  <Button
+                    type="submit"
+                    className="bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white font-medium rounded-full px-6 py-2.5"
+                  >
+                    <Save className="mr-2 h-4 w-4" />
+                    Save Settings
+                  </Button>
+                </div>
               </form>
             </CardContent>
           </Card>
@@ -617,4 +603,3 @@ export default function SettingsPage() {
     </div>
   )
 }
-

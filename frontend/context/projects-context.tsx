@@ -85,18 +85,48 @@ export function ProjectsProvider({ children }: { children: ReactNode }) {
   const [projects, setProjects] = useState<Project[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [lastFetchTime, setLastFetchTime] = useState<number>(0)
+  const [fetchInProgress, setFetchInProgress] = useState<boolean>(false)
 
-  const fetchProjects = async () => {
-    setLoading(true)
-    setError(null)
+  const fetchProjects = async (force = false) => {
+    // Return immediately if:
+    // 1. A fetch is already in progress, OR
+    // 2. It's been less than 5 seconds since the last fetch AND force is false
+    const now = Date.now();
+    const timeSinceLastFetch = now - lastFetchTime;
+    
+    if (fetchInProgress) {
+      console.log("Projects fetch already in progress, skipping");
+      return;
+    }
+    
+    if (!force && timeSinceLastFetch < 5000 && projects.length > 0) {
+      console.log("Using cached projects data");
+      return;
+    }
+    
+    setFetchInProgress(true);
+    setLoading(true);
+    setError(null);
+    
     try {
-      const { data } = await projectsApi.getProjects()
-      setProjects(data.projects || [])
+      console.log("Fetching projects...");
+      const { data } = await projectsApi.getProjects();
+      
+      if (data && data.projects) {
+        console.log(`Fetched ${data.projects.length} projects`);
+        setProjects(data.projects);
+        setLastFetchTime(Date.now());
+      } else {
+        console.warn("Unexpected projects response format:", data);
+        setProjects([]);
+      }
     } catch (err: any) {
-      setError(err.response?.data?.message || "Failed to fetch projects")
-      console.error("Error fetching projects:", err)
+      setError(err.response?.data?.message || "Failed to fetch projects");
+      console.error("Error fetching projects:", err);
     } finally {
-      setLoading(false)
+      setLoading(false);
+      setFetchInProgress(false);
     }
   }
 
@@ -243,4 +273,3 @@ export function useProjects() {
   }
   return context
 }
-

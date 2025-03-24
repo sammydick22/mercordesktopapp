@@ -78,7 +78,7 @@ SimpleDialogContent.displayName = "SimpleDialogContent"
 export default function ProjectsPage() {
   const { user, loading: authLoading } = useAuth()
   const { projects, activeProjects, loading: projectsLoading, error, fetchProjects, createProject } = useProjects()
-  const { activeClients } = useClients()
+  const { activeClients, loading: clientsLoading, fetchClients } = useClients()
   const [searchQuery, setSearchQuery] = useState("")
   const [showAddProject, setShowAddProject] = useState(false)
   const [showProjectTasks, setShowProjectTasks] = useState<string | null>(null)
@@ -91,6 +91,30 @@ export default function ProjectsPage() {
     is_billable: true,
   })
   const router = useRouter()
+  
+  // Fetch projects and clients on initial load
+  useEffect(() => {
+    console.log("Initial page load - fetching projects and clients");
+    // Force immediate refresh of projects data
+    fetchProjects();
+    fetchClients();
+    
+    // Setup periodic refresh for long sessions
+    const refreshInterval = setInterval(() => {
+      console.log("Periodic refresh");
+      fetchProjects();
+    }, 30000); // Refresh every 30 seconds
+    
+    return () => clearInterval(refreshInterval);
+  }, [fetchProjects, fetchClients]);
+  
+  // Refresh clients only when dialog opens
+  useEffect(() => {
+    if (showAddProject) {
+      console.log("Project dialog opened, refreshing clients");
+      fetchClients();
+    }
+  }, [showAddProject, fetchClients]);
 
   useEffect(() => {
     if (!authLoading && !user) {
@@ -201,21 +225,35 @@ export default function ProjectsPage() {
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="client">Client</Label>
-                  <Select
+                  <select
+                    id="client"
+                    className="flex h-10 w-full rounded-md border px-3 py-2 text-base ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 md:text-sm bg-[#1E293B] border-[#2D3748] text-white"
                     value={newProject.client_id}
-                    onValueChange={(value) => setNewProject({ ...newProject, client_id: value })}
+                    onChange={(e) => setNewProject({ ...newProject, client_id: e.target.value })}
                   >
-                    <SelectTrigger id="client" className="bg-[#1E293B] border-[#2D3748] text-white">
-                      <SelectValue placeholder="Select client" />
-                    </SelectTrigger>
-                    <SelectContent className="bg-[#0F172A] border-[#1E293B]">
-                      {activeClients.map((client) => (
-                        <SelectItem key={client.id} value={client.id} className="text-white hover:bg-[#1E293B]">
+                    <option value="" className="text-gray-400">Select client</option>
+                    {activeClients.length === 0 ? (
+                      <option value="" disabled className="text-gray-400">No clients available</option>
+                    ) : (
+                      activeClients.map((client) => (
+                        <option key={client.id} value={client.id} className="text-white">
                           {client.name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                        </option>
+                      ))
+                    )}
+                  </select>
+                  {/* Debug info - only visible in development */}
+                  {process.env.NODE_ENV === 'development' && (
+                    <div className="text-xs text-blue-400 mt-1">
+                      {activeClients.length > 0 ? (
+                        <span>Available clients: {activeClients.map(c => c.name).join(', ')}</span>
+                      ) : clientsLoading ? (
+                        <span>Loading clients...</span>
+                      ) : (
+                        <span>No clients found</span>
+                      )}
+                    </div>
+                  )}
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="description">Description</Label>

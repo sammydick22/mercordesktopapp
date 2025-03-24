@@ -9,7 +9,6 @@ import { useTimeTracking } from "@/context/time-tracking-context"
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
 import { Play, Pause, Briefcase, ListTodo, Timer } from "lucide-react"
 import { formatDuration } from "@/lib/utils"
@@ -121,22 +120,18 @@ export default function TimeTrackingPage() {
                       <Briefcase className="h-4 w-4" />
                       Project
                     </Label>
-                    <Select value={projectId} onValueChange={setProjectId} disabled={currentTimeEntry?.is_active}>
-                      <SelectTrigger id="project" className="bg-[#1E293B] border-[#2D3748] text-white">
-                        <SelectValue placeholder="Select project" />
-                      </SelectTrigger>
-                      <SelectContent className="bg-[#0F172A] border-[#1E293B]">
-                        <SelectItem value="project1" className="text-white hover:bg-[#1E293B]">
-                          Project 1
-                        </SelectItem>
-                        <SelectItem value="project2" className="text-white hover:bg-[#1E293B]">
-                          Project 2
-                        </SelectItem>
-                        <SelectItem value="project3" className="text-white hover:bg-[#1E293B]">
-                          Project 3
-                        </SelectItem>
-                      </SelectContent>
-                    </Select>
+                    <select
+                      id="project"
+                      className="flex h-10 w-full rounded-md border px-3 py-2 text-base ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 md:text-sm bg-[#1E293B] border-[#2D3748] text-white"
+                      value={projectId || ""}
+                      onChange={(e) => setProjectId(e.target.value === "" ? undefined : e.target.value)}
+                      disabled={currentTimeEntry?.is_active}
+                    >
+                      <option value="" className="text-gray-400">Select project</option>
+                      <option value="project1" className="text-white">Project 1</option>
+                      <option value="project2" className="text-white">Project 2</option>
+                      <option value="project3" className="text-white">Project 3</option>
+                    </select>
                   </div>
 
                   <div className="space-y-2">
@@ -144,22 +139,18 @@ export default function TimeTrackingPage() {
                       <ListTodo className="h-4 w-4" />
                       Task
                     </Label>
-                    <Select value={taskId} onValueChange={setTaskId} disabled={currentTimeEntry?.is_active}>
-                      <SelectTrigger id="task" className="bg-[#1E293B] border-[#2D3748] text-white">
-                        <SelectValue placeholder="Select task" />
-                      </SelectTrigger>
-                      <SelectContent className="bg-[#0F172A] border-[#1E293B]">
-                        <SelectItem value="task1" className="text-white hover:bg-[#1E293B]">
-                          Task 1
-                        </SelectItem>
-                        <SelectItem value="task2" className="text-white hover:bg-[#1E293B]">
-                          Task 2
-                        </SelectItem>
-                        <SelectItem value="task3" className="text-white hover:bg-[#1E293B]">
-                          Task 3
-                        </SelectItem>
-                      </SelectContent>
-                    </Select>
+                    <select
+                      id="task"
+                      className="flex h-10 w-full rounded-md border px-3 py-2 text-base ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 md:text-sm bg-[#1E293B] border-[#2D3748] text-white"
+                      value={taskId || ""}
+                      onChange={(e) => setTaskId(e.target.value === "" ? undefined : e.target.value)}
+                      disabled={currentTimeEntry?.is_active}
+                    >
+                      <option value="" className="text-gray-400">Select task</option>
+                      <option value="task1" className="text-white">Task 1</option>
+                      <option value="task2" className="text-white">Task 2</option>
+                      <option value="task3" className="text-white">Task 3</option>
+                    </select>
                   </div>
                 </div>
 
@@ -226,4 +217,3 @@ export default function TimeTrackingPage() {
     </div>
   )
 }
-

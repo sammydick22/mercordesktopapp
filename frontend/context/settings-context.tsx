@@ -30,6 +30,7 @@ interface SettingsContextType {
   updateSettings: (data: Partial<AppSettings>) => Promise<void>
   updateProfile: (data: Partial<UserProfile>) => Promise<void>
   changePassword: (currentPassword: string, newPassword: string) => Promise<void>
+  resetSettings: () => Promise<void>
 }
 
 const SettingsContext = createContext<SettingsContextType | undefined>(undefined)
@@ -45,7 +46,9 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     setError(null)
     try {
       const { data } = await settingsApi.getSettings()
-      setSettings(data.settings)
+      // The API returns the settings directly, not wrapped in a "settings" object
+      setSettings(data)
+      console.log("Settings loaded:", data)
     } catch (err: any) {
       setError(err.response?.data?.message || "Failed to fetch settings")
       console.error("Error fetching settings:", err)
@@ -59,7 +62,9 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     setError(null)
     try {
       const { data } = await settingsApi.getUserProfile()
-      setProfile(data.profile)
+      // The API returns the profile directly, not wrapped in a "profile" object
+      setProfile(data)
+      console.log("Profile loaded:", data)
     } catch (err: any) {
       setError(err.response?.data?.message || "Failed to fetch profile")
       console.error("Error fetching profile:", err)
@@ -73,7 +78,9 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     setError(null)
     try {
       const { data } = await settingsApi.updateSettings(settingsData)
-      setSettings(data.settings)
+      // The API returns the updated settings directly, not wrapped in a "settings" object
+      setSettings(data)
+      console.log("Settings updated:", data)
     } catch (err: any) {
       setError(err.response?.data?.message || "Failed to update settings")
       throw err
@@ -87,7 +94,9 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     setError(null)
     try {
       const { data } = await settingsApi.updateUserProfile(profileData)
-      setProfile(data.profile)
+      // The API returns the updated profile directly, not wrapped in a "profile" object
+      setProfile(data)
+      console.log("Profile updated:", data)
     } catch (err: any) {
       setError(err.response?.data?.message || "Failed to update profile")
       throw err
@@ -112,10 +121,54 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     }
   }
 
+  const resetSettings = async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const { data } = await settingsApi.resetSettings()
+      setSettings(data)
+      console.log("Settings reset to defaults:", data)
+    } catch (err: any) {
+      setError(err.response?.data?.message || "Failed to reset settings")
+      throw err
+    } finally {
+      setLoading(false)
+    }
+  }
+
   useEffect(() => {
-    fetchSettings()
-    fetchProfile()
+    // Only fetch settings and profile when we have a user logged in
+    const token = localStorage.getItem("auth_token")
+    if (token) {
+      console.log("Auth token found, fetching settings and profile")
+      fetchSettings()
+      fetchProfile()
+    } else {
+      console.log("No auth token found, skipping settings fetch")
+    }
   }, [])
+
+  // Add a second effect that runs when auth status might change
+  useEffect(() => {
+    const handleStorageChange = () => {
+      const token = localStorage.getItem("auth_token")
+      if (token && !profile) {
+        console.log("Auth token changed, fetching settings and profile")
+        fetchSettings()
+        fetchProfile()
+      }
+    }
+
+    // Listen for storage events (when token is added/removed)
+    window.addEventListener('storage', handleStorageChange)
+    
+    // Check immediately as well
+    handleStorageChange()
+    
+    return () => {
+      window.removeEventListener('storage', handleStorageChange)
+    }
+  }, [profile])
 
   return (
     <SettingsContext.Provider
@@ -129,6 +182,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
         updateSettings,
         updateProfile,
         changePassword,
+        resetSettings,
       }}
     >
       {children}
@@ -143,4 +197,3 @@ export function useSettings() {
   }
   return context
 }
-

@@ -3,6 +3,7 @@
 import { createContext, useContext, useState, useEffect, type ReactNode } from "react"
 import { useRouter } from "next/navigation"
 import * as authApi from "@/api/auth"
+import { notifyAuthChange } from "@/api/client"
 
 interface User {
   id: string
@@ -53,6 +54,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       const { data } = await authApi.login(email, password)
       localStorage.setItem("auth_token", data.session.access_token)
+      // Notify other components about the auth change
+      notifyAuthChange()
       setUser(data.user)
       router.push("/")
     } catch (err: any) {
@@ -69,6 +72,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       const { data } = await authApi.signup(email, password)
       localStorage.setItem("auth_token", data.session.access_token)
+      // Notify other components about the auth change
+      notifyAuthChange()
       setUser(data.user)
       router.push("/")
     } catch (err: any) {
@@ -84,6 +89,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       await authApi.logout()
       localStorage.removeItem("auth_token")
+      // Notify other components about the auth change
+      notifyAuthChange()
       setUser(null)
       router.push("/login")
     } catch (err) {
@@ -130,4 +137,3 @@ export function useAuth() {
   }
   return context
 }
-

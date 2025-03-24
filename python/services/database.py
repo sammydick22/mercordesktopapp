@@ -7,7 +7,7 @@ import json
 import logging
 from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime
-
+import uuid
 from utils.config import Config
 
 # Setup logger
@@ -139,16 +139,29 @@ class DatabaseService:
             # Screenshots table
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS screenshots (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id TEXT PRIMARY KEY,
                 filepath TEXT NOT NULL,
-                thumbnail_path TEXT,
+                thumbnail_path TEXT NOT NULL,
                 activity_log_id INTEGER,
+                time_entry_id TEXT,
                 timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 synced BOOLEAN NOT NULL DEFAULT 0,
                 created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (activity_log_id) REFERENCES activity_logs(id)
             )
             ''')
+            
+            # Ensure columns exist for backward compatibility
+            cursor.execute("PRAGMA table_info(screenshots)")
+            columns = [column[1] for column in cursor.fetchall()]
+            
+            # Add time_entry_id if missing
+            if "time_entry_id" not in columns:
+                try:
+                    cursor.execute("ALTER TABLE screenshots ADD COLUMN time_entry_id TEXT")
+                    logger.info("Added time_entry_id column to screenshots table in core schema")
+                except Exception as e:
+                    logger.warning(f"Could not add time_entry_id column: {e}")
             
             # System metrics table
             cursor.execute('''
@@ -207,6 +220,7 @@ class DatabaseService:
                 hourly_rate REAL DEFAULT 0,
                 is_billable BOOLEAN NOT NULL DEFAULT 1,
                 is_active BOOLEAN NOT NULL DEFAULT 1,
+                user_id TEXT NOT NULL,
                 synced BOOLEAN NOT NULL DEFAULT 0,
                 created_at TIMESTAMP NOT NULL,
                 updated_at TIMESTAMP NOT NULL,
@@ -1351,13 +1365,14 @@ class DatabaseService:
             return None
 
     # Client CRUD operations
-    def get_clients(self, limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
+    def get_clients(self, limit: int = 50, offset: int = 0, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         Get clients with pagination.
         
         Args:
             limit: Maximum number of clients to return
             offset: Offset for pagination
+            user_id: Filter by user ID
             
         Returns:
             list: List of clients
@@ -1365,22 +1380,38 @@ class DatabaseService:
         try:
             cursor = self.conn.cursor()
             
-            # Count total clients
-            cursor.execute('SELECT COUNT(*) FROM clients')
+            # Build base query conditions
+            conditions = []
+            params = []
+            
+            if user_id:
+                conditions.append('user_id = ?')
+                params.append(user_id)
+            
+            # Build WHERE clause
+            where_clause = ' AND '.join(conditions) if conditions else '1=1'
+            
+            # Count total clients with filter
+            count_query = f'SELECT COUNT(*) FROM clients WHERE {where_clause}'
+            cursor.execute(count_query, params)
             total = cursor.fetchone()[0]
             
             # Build query
-            query = '''
+            query = f'''
             SELECT 
                 id, name, contact_name, email, phone, address, notes,
-                is_active, synced, created_at, updated_at
+                is_active, synced, created_at, updated_at, user_id
             FROM clients 
+            WHERE {where_clause}
             ORDER BY name ASC
             LIMIT ? OFFSET ?
             '''
             
+            # Add limit and offset to params
+            params.extend([limit, offset])
+            
             # Execute query
-            cursor.execute(query, (limit, offset))
+            cursor.execute(query, params)
             
             # Get results
             results = cursor.fetchall()
@@ -1389,7 +1420,7 @@ class DatabaseService:
             column_names = [
                 'id', 'name', 'contact_name', 'email', 'phone', 
                 'address', 'notes', 'is_active', 'synced', 
-                'created_at', 'updated_at'
+                'created_at', 'updated_at', 'user_id'
             ]
             
             return {

@@ -31,11 +31,16 @@ apiClient.interceptors.response.use(
         const { data } = await apiClient.post("/auth/refresh")
         // Update stored token
         localStorage.setItem("auth_token", data.session.access_token)
+        // Trigger storage event for other tabs/components to detect
+        window.dispatchEvent(new Event('storage'))
         // Retry the original request
         return apiClient(originalRequest)
       } catch (refreshError) {
         // Handle refresh failure (logout, etc.)
         localStorage.removeItem("auth_token")
+        // Trigger storage event for other tabs/components to detect
+        window.dispatchEvent(new Event('storage'))
+        // Redirect to login
         window.location.href = "/login"
         return Promise.reject(refreshError)
       }
@@ -44,5 +49,10 @@ apiClient.interceptors.response.use(
   },
 )
 
-export default apiClient
+// Add a function to manually dispatch storage event
+// This helps components detect auth changes within the same window
+export const notifyAuthChange = () => {
+  window.dispatchEvent(new Event('storage'))
+}
 
+export default apiClient
