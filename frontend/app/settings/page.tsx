@@ -487,6 +487,40 @@ export default function SettingsPage() {
                       </p>
                     </div>
                   </div>
+
+                  <div className="space-y-4">
+                    <h3 className="text-lg font-medium text-white">Database Maintenance</h3>
+                    
+                    <div className="space-y-2">
+                      <div className="flex flex-col space-y-2">
+                        <div className="flex justify-between items-center">
+                          <div>
+                            <Label>Clean up orphaned organization memberships</Label>
+                            <p className="text-xs text-gray-500">
+                              Remove memberships that reference non-existent organizations
+                            </p>
+                          </div>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            className="bg-transparent border-[#2D3748] text-white hover:bg-[#1E293B]"
+                            onClick={async () => {
+                              try {
+                                const { cleanupOrphanedMemberships } = await import('@/api/organizations');
+                                const result = await cleanupOrphanedMemberships();
+                                setSuccessMessage(`Successfully cleaned up ${result.data.orphaned_count} orphaned memberships`);
+                                setTimeout(() => setSuccessMessage(""), 5000);
+                              } catch (error) {
+                                console.error("Error cleaning up orphaned memberships:", error);
+                              }
+                            }}
+                          >
+                            Clean Up
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
                 </div>
 
                 <div className="flex justify-between">

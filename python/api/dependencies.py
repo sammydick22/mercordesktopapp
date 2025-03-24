@@ -6,7 +6,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Optional
 
 from services.supabase_auth import SupabaseAuthService
-from services.supabase_sync import SupabaseSyncService
+from services.improved_sync import ImprovedSupabaseSyncService
 from services.database import DatabaseService
 
 # Security scheme
@@ -37,7 +37,7 @@ def get_sync_service():
     if _sync_service is None:
         db_service = get_db_service()
         auth_service = get_auth_service()
-        _sync_service = SupabaseSyncService(db_service, auth_service)
+        _sync_service = ImprovedSupabaseSyncService(db_service, auth_service)
     return _sync_service
 
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security),

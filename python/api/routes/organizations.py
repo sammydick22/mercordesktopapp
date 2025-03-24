@@ -10,6 +10,7 @@ import json
 
 from api.dependencies import get_current_user
 from services.database import DatabaseService
+from services.supabase_auth import SupabaseAuthService
 
 # Setup logger
 logger = logging.getLogger(__name__)
@@ -136,6 +137,42 @@ async def create_organization(
             cursor.execute("DELETE FROM organizations WHERE id = ?", (org_id,))
             conn.commit()
             raise HTTPException(status_code=500, detail="Failed to create organization membership")
+        
+        # Push organization and membership to Supabase
+        try:
+            # Get Supabase client from auth service
+            auth_service = SupabaseAuthService()
+            supabase = auth_service.supabase
+            
+            if supabase:
+                # Create organization in Supabase
+                logger.info(f"Pushing organization {org_id} to Supabase")
+                org_data = {
+                    "id": org_id,
+                    "name": organization["name"],
+                    "settings": json.dumps(organization["settings"]) if isinstance(organization["settings"], dict) else organization["settings"],
+                    "created_at": organization["created_at"],
+                    "updated_at": organization["updated_at"]
+                }
+                supabase.table("organizations").insert(org_data).execute()
+                
+                # Create membership in Supabase
+                logger.info(f"Pushing membership for user {user_id} and organization {org_id} to Supabase")
+                membership_data = {
+                    "id": membership["id"],
+                    "org_id": org_id,
+                    "user_id": user_id,
+                    "role": "owner",
+                    "created_at": now
+                }
+                supabase.table("org_members").insert(membership_data).execute()
+                
+                logger.info(f"Organization {org_id} pushed to Supabase successfully")
+            else:
+                logger.warning("Supabase client not available, skipping remote organization creation")
+        except Exception as e:
+            logger.error(f"Failed to push organization to Supabase: {str(e)}")
+            # Continue even if Supabase push fails to maintain local functionality
         
         return {"organization": organization}
         
@@ -299,6 +336,28 @@ async def update_organization(
         if not success:
             raise HTTPException(status_code=500, detail="Failed to update organization")
         
+        # Update organization in Supabase
+        try:
+            # Get Supabase client from auth service
+            auth_service = SupabaseAuthService()
+            supabase = auth_service.supabase
+            
+            if supabase:
+                # Update organization in Supabase
+                logger.info(f"Updating organization {org_id} in Supabase")
+                org_data = {
+                    "name": updated_org["name"],
+                    "settings": json.dumps(updated_org["settings"]) if isinstance(updated_org["settings"], dict) else updated_org["settings"],
+                    "updated_at": updated_org["updated_at"]
+                }
+                supabase.table("organizations").update(org_data).eq("id", org_id).execute()
+                logger.info(f"Organization {org_id} updated in Supabase successfully")
+            else:
+                logger.warning("Supabase client not available, skipping remote organization update")
+        except Exception as e:
+            logger.error(f"Failed to update organization in Supabase: {str(e)}")
+            # Continue even if Supabase update fails to maintain local functionality
+        
         return updated_org
         
     except HTTPException:
@@ -375,6 +434,28 @@ async def delete_organization(
         
         conn.commit()
         
+        # Delete organization and memberships from Supabase
+        try:
+            # Get Supabase client from auth service
+            auth_service = SupabaseAuthService()
+            supabase = auth_service.supabase
+            
+            if supabase:
+                # Delete memberships in Supabase
+                logger.info(f"Deleting organization memberships for org {org_id} from Supabase")
+                supabase.table("org_members").delete().eq("org_id", org_id).execute()
+                
+                # Delete organization in Supabase
+                logger.info(f"Deleting organization {org_id} from Supabase")
+                supabase.table("organizations").delete().eq("id", org_id).execute()
+                
+                logger.info(f"Organization {org_id} and its memberships deleted from Supabase successfully")
+            else:
+                logger.warning("Supabase client not available, skipping remote organization deletion")
+        except Exception as e:
+            logger.error(f"Failed to delete organization from Supabase: {str(e)}")
+            # Continue even if Supabase deletion fails to maintain local functionality
+        
         return {
             "id": org[0],
             "name": org[1],
@@ -386,6 +467,53 @@ async def delete_organization(
     except Exception as e:
         logger.error(f"Error deleting organization: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to delete organization: {str(e)}")
+        
+@router.post("/organizations/cleanup")
+async def cleanup_orphaned_memberships(
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Clean up orphaned organization memberships.
+    
+    This endpoint removes memberships that reference non-existent organizations.
+    Useful for maintenance operations.
+    
+    Returns:
+        Result of the cleanup operation
+    """
+    try:
+        user_id = current_user.get("id")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="User ID not found")
+        
+        # Only allow cleanup for authenticated users
+        logger.info(f"User {user_id} initiated cleanup of orphaned organization memberships")
+        
+        # Clean up orphaned memberships
+        cleanup_result = db_service.cleanup_orphaned_memberships()
+        
+        if not cleanup_result["success"]:
+            raise HTTPException(
+                status_code=500, 
+                detail=f"Failed to clean up orphaned memberships: {cleanup_result.get('error', 'Unknown error')}"
+            )
+        
+        # Also check and remove memberships for a known problematic test organization ID
+        problematic_org_id = "123e4567-e89b-12d3-a456-426614174000"
+        logger.info(f"Removing memberships for known problematic organization ID: {problematic_org_id}")
+        db_service.remove_specific_membership(problematic_org_id)
+        
+        return {
+            "status": "success",
+            "orphaned_count": cleanup_result["orphaned_count"],
+            "message": f"Successfully cleaned up {cleanup_result['orphaned_count']} orphaned organization memberships"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error cleaning up orphaned memberships: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to clean up orphaned memberships: {str(e)}")
 
 @router.get("/organizations/{org_id}/members")
 async def get_organization_members(
@@ -532,6 +660,31 @@ async def add_organization_member(
         success = db_service.save_org_membership(membership)
         if not success:
             raise HTTPException(status_code=500, detail="Failed to add organization member")
+            
+        # Push membership to Supabase
+        try:
+            # Get Supabase client from auth service
+            auth_service = SupabaseAuthService()
+            supabase = auth_service.supabase
+            
+            if supabase:
+                # Create membership in Supabase
+                logger.info(f"Pushing membership for user {member_data['user_id']} and organization {org_id} to Supabase")
+                membership_data = {
+                    "id": member_id,
+                    "org_id": org_id,
+                    "user_id": member_data["user_id"],
+                    "role": role,
+                    "created_at": now
+                }
+                supabase.table("org_members").insert(membership_data).execute()
+                
+                logger.info(f"Membership for user {member_data['user_id']} pushed to Supabase successfully")
+            else:
+                logger.warning("Supabase client not available, skipping remote membership creation")
+        except Exception as e:
+            logger.error(f"Failed to push membership to Supabase: {str(e)}")
+            # Continue even if Supabase push fails to maintain local functionality
         
         return membership
         
@@ -615,6 +768,24 @@ async def remove_organization_member(
         )
         
         conn.commit()
+        
+        # Remove membership from Supabase
+        try:
+            # Get Supabase client from auth service
+            auth_service = SupabaseAuthService()
+            supabase = auth_service.supabase
+            
+            if supabase:
+                # Delete membership in Supabase
+                logger.info(f"Removing membership for user {member_user_id} and organization {org_id} from Supabase")
+                supabase.table("org_members").delete().eq("org_id", org_id).eq("user_id", member_user_id).execute()
+                
+                logger.info(f"Membership for user {member_user_id} removed from Supabase successfully")
+            else:
+                logger.warning("Supabase client not available, skipping remote membership deletion")
+        except Exception as e:
+            logger.error(f"Failed to remove membership from Supabase: {str(e)}")
+            # Continue even if Supabase deletion fails to maintain local functionality
         
         return {
             "org_id": org_id,

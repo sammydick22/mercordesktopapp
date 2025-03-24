@@ -228,6 +228,25 @@ class DatabaseService:
             )
             ''')
             
+            # Time entries table
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS time_entries (
+                id TEXT PRIMARY KEY,
+                start_time TIMESTAMP NOT NULL,
+                end_time TIMESTAMP,
+                duration INTEGER,
+                project_id TEXT,
+                task_id TEXT,
+                description TEXT,
+                is_active BOOLEAN NOT NULL DEFAULT 1,
+                synced BOOLEAN NOT NULL DEFAULT 0,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                user_id TEXT NOT NULL,
+                FOREIGN KEY (project_id) REFERENCES projects(id)
+            )
+            ''')
+            
             # Create indices
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_activity_logs_is_active ON activity_logs(is_active)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_activity_logs_synced ON activity_logs(synced)')
@@ -238,6 +257,9 @@ class DatabaseService:
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_org_members_user_id ON org_members(user_id)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_clients_name ON clients(name)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_projects_client_id ON projects(client_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_time_entries_is_active ON time_entries(is_active)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_time_entries_synced ON time_entries(synced)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_time_entries_project_id ON time_entries(project_id)')
             
             # Initialize sync status for each entity type if not exists
             self._ensure_sync_status("activity_logs")
@@ -1276,6 +1298,31 @@ class DatabaseService:
         try:
             cursor = self.conn.cursor()
             
+            # Log membership data
+            logger.info(f"Processing membership data: {json.dumps(membership_data)}")
+            
+            # Validate required fields
+            required_fields = ['id', 'org_id', 'user_id', 'role']
+            for field in required_fields:
+                if field not in membership_data or not membership_data[field]:
+                    logger.error(f"Missing required field '{field}' in membership data")
+                    return False
+            
+            # Verify that the referenced organization exists in the database
+            cursor.execute(
+                'SELECT COUNT(*) FROM organizations WHERE id = ?',
+                (membership_data['org_id'],)
+            )
+            org_exists = cursor.fetchone()[0] > 0
+            
+            if not org_exists:
+                logger.error(f"Cannot save membership: Organization with ID '{membership_data['org_id']}' does not exist in local database")
+                # Dump diagnostic info
+                cursor.execute('SELECT id, name FROM organizations')
+                orgs = cursor.fetchall()
+                logger.debug(f"Available organizations in database: {orgs}")
+                return False
+            
             # Check if membership exists
             cursor.execute(
                 'SELECT COUNT(*) FROM org_members WHERE id = ?',
@@ -1283,9 +1330,11 @@ class DatabaseService:
             )
             
             exists = cursor.fetchone()[0] > 0
+            logger.debug(f"Membership record exists: {exists}")
             
             if exists:
                 # Update existing membership
+                logger.info(f"Updating existing membership for organization '{membership_data['org_id']}'")
                 cursor.execute(
                     '''
                     UPDATE org_members
@@ -1301,27 +1350,63 @@ class DatabaseService:
                 )
             else:
                 # Create new membership
+                logger.info(f"Creating new membership for organization '{membership_data['org_id']}'")
+                
+                # Double check for duplicate org_id/user_id combo before inserting
                 cursor.execute(
-                    '''
-                    INSERT INTO org_members
-                    (id, org_id, user_id, role, created_at)
-                    VALUES (?, ?, ?, ?, ?)
-                    ''',
-                    (
-                        membership_data['id'],
-                        membership_data['org_id'],
-                        membership_data['user_id'],
-                        membership_data['role'],
-                        membership_data.get('created_at') or datetime.now().isoformat()
-                    )
+                    'SELECT COUNT(*) FROM org_members WHERE org_id = ? AND user_id = ?',
+                    (membership_data['org_id'], membership_data['user_id'])
                 )
+                duplicate_exists = cursor.fetchone()[0] > 0
+                
+                if duplicate_exists:
+                    logger.warning(f"Membership for org '{membership_data['org_id']}' and user '{membership_data['user_id']}' already exists. Skipping.")
+                    return True
+                
+                # Insert the new membership
+                try:
+                    cursor.execute(
+                        '''
+                        INSERT INTO org_members
+                        (id, org_id, user_id, role, created_at)
+                        VALUES (?, ?, ?, ?, ?)
+                        ''',
+                        (
+                            membership_data['id'],
+                            membership_data['org_id'],
+                            membership_data['user_id'],
+                            membership_data['role'],
+                            membership_data.get('created_at') or datetime.now().isoformat()
+                        )
+                    )
+                except sqlite3.IntegrityError as ie:
+                    # Detailed logging for integrity errors
+                    error_msg = str(ie)
+                    logger.error(f"Database integrity error: {error_msg}")
+                    
+                    if "FOREIGN KEY constraint failed" in error_msg:
+                        # Check which constraint specifically failed
+                        logger.error(f"Foreign key constraint failed for membership: org_id={membership_data['org_id']}, user_id={membership_data['user_id']}")
+                        
+                        # Verify organization existence one more time
+                        cursor.execute('SELECT * FROM organizations WHERE id = ?', (membership_data['org_id'],))
+                        org = cursor.fetchone()
+                        if org:
+                            logger.info(f"Organization exists: {org}")
+                        else:
+                            logger.error(f"Organization with ID '{membership_data['org_id']}' definitely does not exist")
+                    
+                    self.conn.rollback()
+                    return False
                 
             # Commit changes
             self.conn.commit()
+            logger.info(f"Successfully saved membership for org '{membership_data['org_id']}', user '{membership_data['user_id']}'")
             
             return True
         except Exception as e:
             logger.error(f"Error saving organization membership: {str(e)}")
+            logger.error(f"Membership data: {json.dumps(membership_data)}")
             self.conn.rollback()
             return False
             
@@ -1363,6 +1448,158 @@ class DatabaseService:
         except Exception as e:
             logger.error(f"Error getting user organization membership: {str(e)}")
             return None
+            
+    def get_user_org_memberships(self, user_id: str) -> List[Dict[str, Any]]:
+        """
+        Get all organization memberships for a user.
+        
+        Args:
+            user_id: User ID
+            
+        Returns:
+            list: List of organization memberships
+        """
+        try:
+            cursor = self.conn.cursor()
+            
+            # Get all user's organization memberships
+            cursor.execute(
+                '''
+                SELECT 
+                    id, org_id, user_id, role, created_at
+                FROM org_members
+                WHERE user_id = ?
+                ''',
+                (user_id,)
+            )
+            
+            memberships = cursor.fetchall()
+            
+            if not memberships:
+                return []
+                
+            # Convert to list of dictionaries
+            column_names = [
+                'id', 'org_id', 'user_id', 'role', 'created_at'
+            ]
+            
+            return [dict(zip(column_names, membership)) for membership in memberships]
+        except Exception as e:
+            logger.error(f"Error getting user organization memberships: {str(e)}")
+            return []
+            
+    def cleanup_orphaned_memberships(self) -> Dict[str, Any]:
+        """
+        Clean up orphaned organization memberships that reference non-existent organizations.
+        
+        Returns:
+            dict: Cleanup results with counts
+        """
+        try:
+            cursor = self.conn.cursor()
+            
+            # Find orphaned memberships
+            cursor.execute(
+                '''
+                SELECT om.id, om.org_id, om.user_id
+                FROM org_members om
+                LEFT JOIN organizations o ON om.org_id = o.id
+                WHERE o.id IS NULL
+                '''
+            )
+            
+            orphaned_memberships = cursor.fetchall()
+            orphaned_count = len(orphaned_memberships)
+            
+            # Log orphaned memberships before deletion for diagnostic purposes
+            if orphaned_count > 0:
+                logger.warning(f"Found {orphaned_count} orphaned memberships referencing non-existent organizations")
+                for membership in orphaned_memberships:
+                    logger.warning(f"Orphaned membership: id={membership[0]}, org_id={membership[1]}, user_id={membership[2]}")
+                
+                # Delete orphaned memberships
+                cursor.execute(
+                    '''
+                    DELETE FROM org_members
+                    WHERE id IN (
+                        SELECT om.id
+                        FROM org_members om
+                        LEFT JOIN organizations o ON om.org_id = o.id
+                        WHERE o.id IS NULL
+                    )
+                    '''
+                )
+                
+                self.conn.commit()
+                logger.info(f"Successfully cleaned up {orphaned_count} orphaned memberships")
+            else:
+                logger.info("No orphaned memberships found")
+            
+            return {
+                "orphaned_count": orphaned_count,
+                "success": True
+            }
+            
+        except Exception as e:
+            logger.error(f"Error cleaning up orphaned memberships: {str(e)}")
+            self.conn.rollback()
+            
+            return {
+                "orphaned_count": 0,
+                "success": False,
+                "error": str(e)
+            }
+            
+    def remove_specific_membership(self, org_id: str) -> bool:
+        """
+        Remove a specific membership by organization ID.
+        
+        Args:
+            org_id: Organization ID to remove memberships for
+            
+        Returns:
+            bool: True if successful
+        """
+        try:
+            cursor = self.conn.cursor()
+            
+            # Find memberships for the organization
+            cursor.execute(
+                '''
+                SELECT id, user_id FROM org_members
+                WHERE org_id = ?
+                ''',
+                (org_id,)
+            )
+            
+            memberships = cursor.fetchall()
+            
+            if not memberships:
+                logger.info(f"No memberships found for organization: {org_id}")
+                return True
+                
+            # Log memberships before deletion
+            for membership in memberships:
+                logger.warning(f"Removing membership: id={membership[0]}, org_id={org_id}, user_id={membership[1]}")
+            
+            # Delete memberships
+            cursor.execute(
+                '''
+                DELETE FROM org_members
+                WHERE org_id = ?
+                ''',
+                (org_id,)
+            )
+            
+            self.conn.commit()
+            logger.info(f"Successfully removed {len(memberships)} memberships for organization: {org_id}")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error removing membership for organization {org_id}: {str(e)}")
+            self.conn.rollback()
+            return False
 
     # Client CRUD operations
     def get_clients(self, limit: int = 50, offset: int = 0, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -1615,3 +1852,330 @@ class DatabaseService:
             logger.error(f"Error deleting client: {str(e)}")
             self.conn.rollback()
             return False
+            
+    # Time entries CRUD operations
+    def create_time_entry(
+        self, 
+        user_id: str, 
+        project_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        description: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Create a new time entry.
+        
+        Args:
+            user_id: ID of the user creating the time entry
+            project_id: ID of the project (optional)
+            task_id: ID of the task (optional)
+            description: Description of the time entry (optional)
+            
+        Returns:
+            dict: The created time entry
+        """
+        try:
+            # End any active time entry first
+            self.end_active_time_entries(user_id)
+            
+            cursor = self.conn.cursor()
+            
+            # Generate ID and timestamps
+            time_entry_id = str(uuid.uuid4())
+            now = datetime.now().isoformat()
+            
+            # Insert time entry
+            cursor.execute(
+                '''
+                INSERT INTO time_entries
+                (id, start_time, project_id, task_id, description, is_active, user_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''',
+                (
+                    time_entry_id,
+                    now,
+                    project_id,
+                    task_id,
+                    description,
+                    1,  # is_active = True
+                    user_id,
+                    now,
+                    now
+                )
+            )
+            
+            # Commit changes
+            self.conn.commit()
+            
+            # Return the created time entry
+            return self.get_time_entry(time_entry_id)
+        except Exception as e:
+            logger.error(f"Error creating time entry: {str(e)}")
+            self.conn.rollback()
+            return {}
+            
+    def get_time_entry(self, time_entry_id: str) -> Dict[str, Any]:
+        """
+        Get a time entry by ID.
+        
+        Args:
+            time_entry_id: ID of the time entry to get
+            
+        Returns:
+            dict: The time entry
+        """
+        try:
+            cursor = self.conn.cursor()
+            
+            # Get the time entry
+            cursor.execute(
+                '''
+                SELECT 
+                    id, start_time, end_time, duration, project_id, 
+                    task_id, description, is_active, synced, 
+                    created_at, updated_at, user_id
+                FROM time_entries 
+                WHERE id = ?
+                ''',
+                (time_entry_id,)
+            )
+            
+            time_entry = cursor.fetchone()
+            
+            if not time_entry:
+                logger.warning(f"Time entry not found: {time_entry_id}")
+                return {}
+                
+            # Convert to dictionary
+            column_names = [
+                'id', 'start_time', 'end_time', 'duration', 'project_id',
+                'task_id', 'description', 'is_active', 'synced',
+                'created_at', 'updated_at', 'user_id'
+            ]
+            
+            return dict(zip(column_names, time_entry))
+        except Exception as e:
+            logger.error(f"Error getting time entry: {str(e)}")
+            return {}
+            
+    def get_active_time_entry(self, user_id: str) -> Dict[str, Any]:
+        """
+        Get the currently active time entry for a user.
+        
+        Args:
+            user_id: ID of the user
+            
+        Returns:
+            dict: The active time entry or empty dict if none
+        """
+        try:
+            cursor = self.conn.cursor()
+            
+            # Get the active time entry
+            cursor.execute(
+                '''
+                SELECT 
+                    id, start_time, end_time, duration, project_id, 
+                    task_id, description, is_active, synced, 
+                    created_at, updated_at, user_id
+                FROM time_entries 
+                WHERE user_id = ? AND is_active = 1
+                ''',
+                (user_id,)
+            )
+            
+            time_entry = cursor.fetchone()
+            
+            if not time_entry:
+                return {}
+                
+            # Convert to dictionary
+            column_names = [
+                'id', 'start_time', 'end_time', 'duration', 'project_id',
+                'task_id', 'description', 'is_active', 'synced',
+                'created_at', 'updated_at', 'user_id'
+            ]
+            
+            return dict(zip(column_names, time_entry))
+        except Exception as e:
+            logger.error(f"Error getting active time entry: {str(e)}")
+            return {}
+            
+    def end_time_entry(self, time_entry_id: str, description: Optional[str] = None) -> Dict[str, Any]:
+        """
+        End a time entry by setting end_time and calculating duration.
+        
+        Args:
+            time_entry_id: ID of the time entry to end
+            description: Optional description to update
+            
+        Returns:
+            dict: The updated time entry
+        """
+        try:
+            cursor = self.conn.cursor()
+            
+            # Get the time entry to check if it's active
+            time_entry = self.get_time_entry(time_entry_id)
+            if not time_entry:
+                logger.warning(f"Time entry not found: {time_entry_id}")
+                return {}
+                
+            if not time_entry.get('is_active'):
+                logger.warning(f"Time entry already ended: {time_entry_id}")
+                return time_entry
+                
+            # Set end time and calculate duration
+            now = datetime.now().isoformat()
+            
+            # Parse start time from string if needed
+            start_time = time_entry['start_time']
+            if isinstance(start_time, str):
+                start_datetime = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
+            else:
+                start_datetime = start_time
+                
+            # Calculate duration in seconds
+            end_datetime = datetime.fromisoformat(now.replace('Z', '+00:00'))
+            duration = int((end_datetime - start_datetime).total_seconds())
+            
+            # Update time entry
+            update_parts = [
+                "end_time = ?",
+                "duration = ?",
+                "is_active = 0",
+                "updated_at = ?"
+            ]
+            params = [now, duration, now]
+            
+            # Add description if provided
+            if description is not None:
+                update_parts.append("description = ?")
+                params.append(description)
+                
+            # Add time_entry_id to params
+            params.append(time_entry_id)
+            
+            # Execute update
+            cursor.execute(
+                f'''
+                UPDATE time_entries 
+                SET {', '.join(update_parts)}
+                WHERE id = ?
+                ''',
+                tuple(params)
+            )
+            
+            # Commit changes
+            self.conn.commit()
+            
+            # Return the updated time entry
+            return self.get_time_entry(time_entry_id)
+        except Exception as e:
+            logger.error(f"Error ending time entry: {str(e)}")
+            self.conn.rollback()
+            return {}
+            
+    def end_active_time_entries(self, user_id: str) -> bool:
+        """
+        End any active time entries for a user.
+        
+        Args:
+            user_id: ID of the user
+            
+        Returns:
+            bool: True if successful
+        """
+        try:
+            active_entry = self.get_active_time_entry(user_id)
+            if active_entry:
+                self.end_time_entry(active_entry['id'])
+            return True
+        except Exception as e:
+            logger.error(f"Error ending active time entries: {str(e)}")
+            return False
+            
+    def get_time_entries(
+        self,
+        user_id: str,
+        limit: int = 50,
+        offset: int = 0,
+        project_id: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Get time entries with pagination and optional filtering.
+        
+        Args:
+            user_id: ID of the user
+            limit: Maximum number of entries to return
+            offset: Offset for pagination
+            project_id: Filter by project ID (optional)
+            start_date: Start date for filtering (optional)
+            end_date: End date for filtering (optional)
+            
+        Returns:
+            dict: Dictionary with total count and list of time entries
+        """
+        try:
+            cursor = self.conn.cursor()
+            
+            # Build base query conditions
+            conditions = ["user_id = ?"]
+            params = [user_id]
+            
+            if project_id:
+                conditions.append("project_id = ?")
+                params.append(project_id)
+                
+            if start_date:
+                conditions.append("start_time >= ?")
+                params.append(start_date)
+                
+            if end_date:
+                conditions.append("start_time <= ?")
+                params.append(end_date)
+                
+            # Build WHERE clause
+            where_clause = " AND ".join(conditions)
+            
+            # Count total time entries with filter
+            count_query = f'SELECT COUNT(*) FROM time_entries WHERE {where_clause}'
+            cursor.execute(count_query, params)
+            total = cursor.fetchone()[0]
+            
+            # Build query
+            query = f'''
+            SELECT 
+                id, start_time, end_time, duration, project_id, 
+                task_id, description, is_active, synced, 
+                created_at, updated_at, user_id
+            FROM time_entries 
+            WHERE {where_clause}
+            ORDER BY start_time DESC
+            LIMIT ? OFFSET ?
+            '''
+            
+            # Add limit and offset to params
+            params.extend([limit, offset])
+            
+            # Execute query
+            cursor.execute(query, params)
+            
+            # Get results
+            results = cursor.fetchall()
+            
+            # Convert to list of dictionaries
+            column_names = [
+                'id', 'start_time', 'end_time', 'duration', 'project_id',
+                'task_id', 'description', 'is_active', 'synced',
+                'created_at', 'updated_at', 'user_id'
+            ]
+            
+            return {
+                "total": total,
+                "time_entries": [dict(zip(column_names, row)) for row in results]
+            }
+        except Exception as e:
+            logger.error(f"Error getting time entries: {str(e)}")
+            return {"total": 0, "time_entries": []}

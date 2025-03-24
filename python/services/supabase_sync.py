@@ -359,65 +359,169 @@ class SupabaseSyncService:
         """
         if not self.supabase:
             logger.error("Supabase client not initialized")
-            return {"status": "error"}
+            return {"status": "error", "message": "Supabase client not initialized"}
             
         if not self.auth_service.is_authenticated():
             logger.warning("Cannot sync organization data: Not authenticated")
-            return {"status": "not_authenticated"}
+            return {"status": "not_authenticated", "message": "User not authenticated"}
             
         try:
+            # Clean up orphaned memberships first
+            logger.info("Cleaning up orphaned organization memberships")
+            cleanup_result = self.db_service.cleanup_orphaned_memberships()
+            if cleanup_result["orphaned_count"] > 0:
+                logger.info(f"Cleaned up {cleanup_result['orphaned_count']} orphaned memberships")
+            
+            # Special handling for known problematic organization ID
+            problematic_org_id = "123e4567-e89b-12d3-a456-426614174000"
+            logger.info(f"Checking for problematic test organization ID: {problematic_org_id}")
+            self.db_service.remove_specific_membership(problematic_org_id)
+                
             # Get user data
             user_id = self.auth_service.user.get("id")
+            if not user_id:
+                logger.error("Cannot sync organization data: User ID not available")
+                return {"status": "error", "message": "User ID not available"}
+                
+            logger.info(f"Starting organization data sync for user: {user_id}")
             
             # Get organization memberships
             try:
                 # Use the Supabase client to get memberships
+                logger.info(f"Fetching organization memberships for user: {user_id}")
                 memberships_result = self.supabase.table("org_members").select("*").eq("user_id", user_id).execute()
+                
+                # Log raw API response for debugging
+                logger.debug(f"Supabase memberships response: {json.dumps(memberships_result.data) if memberships_result.data else 'No data'}")
+                
                 memberships = memberships_result.data if memberships_result.data else []
                 
                 if not memberships:
-                    logger.info("No organization memberships found")
-                    return {"status": "no_data"}
+                    logger.info("No organization memberships found for user")
+                    return {"status": "no_data", "message": "No organization memberships found"}
+                    
+                logger.info(f"Found {len(memberships)} organization memberships")
+                
+                # Filter out memberships with the problematic organization ID
+                memberships = [m for m in memberships if m["org_id"] != problematic_org_id]
+                if len(memberships_result.data or []) != len(memberships):
+                    logger.warning(f"Filtered out membership with problematic org ID: {problematic_org_id}")
                 
                 # Get organization details
                 org_ids = [membership["org_id"] for membership in memberships]
                 organizations = []
+                failed_org_ids = []
+                
+                if not org_ids:
+                    logger.info("No valid organization IDs found after filtering")
+                    return {"status": "no_data", "message": "No valid organization IDs"}
+                
+                logger.info(f"Fetching details for {len(org_ids)} organizations: {org_ids}")
                 
                 for org_id in org_ids:
+                    logger.info(f"Fetching organization details for: {org_id}")
                     org_result = self.supabase.table("organizations").select("*").eq("id", org_id).execute()
-                    if org_result.data:
-                        organizations.append(org_result.data[0])
-                
-                # First store ALL organization data locally
-                for org in organizations:
-                    # Ensure the organization record exists before saving memberships that reference it
-                    org_saved = self.db_service.save_organization_data(org)
-                    if not org_saved:
-                        logger.error(f"Failed to save organization: {org['id']}")
-                
-                # Now that all organizations exist locally, save the memberships
-                for membership in memberships:
-                    try:
-                        self.db_service.save_org_membership(membership)
-                    except Exception as e:
-                        # Log error but continue with other memberships
-                        logger.warning(f"Error saving membership for org {membership['org_id']}: {str(e)}")
                     
-                logger.info(f"Organization data sync complete: {len(organizations)} organizations")
+                    if org_result.data and len(org_result.data) > 0:
+                        logger.info(f"Successfully retrieved organization: {org_id}")
+                        organizations.append(org_result.data[0])
+                    else:
+                        logger.warning(f"Organization not found in Supabase: {org_id}")
+                        failed_org_ids.append(org_id)
+                        
+                        # Remove memberships for non-existent organizations
+                        logger.info(f"Removing membership for non-existent organization: {org_id}")
+                        self.db_service.remove_specific_membership(org_id)
+                
+                if not organizations:
+                    logger.warning("No organizations found in Supabase")
+                    return {
+                        "status": "no_data", 
+                        "message": "No organizations found", 
+                        "memberships": memberships,
+                        "cleaned_up": cleanup_result["orphaned_count"]
+                    }
+                
+                # First store ALL organization data locally - with retries
+                successfully_saved_orgs = []
+                for org in organizations:
+                    # Log the organization data being saved
+                    logger.info(f"Saving organization to local database: {org['id']} - {org.get('name', 'No name')}")
+                    
+                    # Try to save organization with retry logic
+                    max_retries = 3
+                    saved = False
+                    
+                    for attempt in range(max_retries):
+                        org_saved = self.db_service.save_organization_data(org)
+                        if org_saved:
+                            logger.info(f"Successfully saved organization: {org['id']}")
+                            successfully_saved_orgs.append(org['id'])
+                            saved = True
+                            break
+                        else:
+                            logger.warning(f"Failed to save organization (attempt {attempt+1}/{max_retries}): {org['id']}")
+                    
+                    if not saved:
+                        logger.error(f"Failed to save organization after {max_retries} attempts: {org['id']}")
+                        failed_org_ids.append(org['id'])
+                
+                # Filter memberships to only include those with successfully saved organizations
+                valid_memberships = [m for m in memberships if m["org_id"] in successfully_saved_orgs]
+                invalid_memberships = [m for m in memberships if m["org_id"] not in successfully_saved_orgs]
+                
+                if invalid_memberships:
+                    logger.warning(f"Skipping {len(invalid_memberships)} memberships with invalid organization references")
+                    for m in invalid_memberships:
+                        logger.debug(f"Skipping membership: org_id={m['org_id']}, user_id={m['user_id']}")
+                
+                # Now that organizations are saved, save the valid memberships
+                successful_memberships = 0
+                failed_memberships = 0
+                
+                for membership in valid_memberships:
+                    try:
+                        logger.info(f"Saving membership: org_id={membership['org_id']}, user_id={membership['user_id']}")
+                        result = self.db_service.save_org_membership(membership)
+                        
+                        if result:
+                            logger.info(f"Successfully saved membership: org_id={membership['org_id']}, user_id={membership['user_id']}")
+                            successful_memberships += 1
+                        else:
+                            logger.warning(f"Failed to save membership: org_id={membership['org_id']}, user_id={membership['user_id']}")
+                            failed_memberships += 1
+                            
+                    except Exception as e:
+                        failed_memberships += 1
+                        logger.error(f"Error saving membership for org {membership['org_id']}: {str(e)}")
+                    
+                logger.info(f"Organization data sync summary:")
+                logger.info(f"  - Organizations: {len(successfully_saved_orgs)} saved, {len(failed_org_ids)} failed")
+                logger.info(f"  - Memberships: {successful_memberships} saved, {failed_memberships} failed")
+                logger.info(f"  - Orphaned memberships cleaned up: {cleanup_result['orphaned_count']}")
                 
                 return {
                     "organizations": organizations,
                     "memberships": memberships,
-                    "status": "complete"
+                    "saved_orgs": len(successfully_saved_orgs),
+                    "failed_orgs": len(failed_org_ids),
+                    "saved_memberships": successful_memberships,
+                    "failed_memberships": failed_memberships,
+                    "cleaned_up": cleanup_result["orphaned_count"],
+                    "status": "complete" if failed_org_ids == [] and failed_memberships == 0 else "partial"
                 }
                 
             except Exception as e:
                 logger.error(f"Error getting organization data: {str(e)}")
-                return {"status": "error"}
+                import traceback
+                logger.error(f"Traceback: {traceback.format_exc()}")
+                return {"status": "error", "message": f"Error getting organization data: {str(e)}"}
                     
         except Exception as e:
             logger.error(f"Organization data sync error: {str(e)}")
-            return {"status": "error"}
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return {"status": "error", "message": f"Sync error: {str(e)}"}
             
     async def sync_all(self) -> Dict[str, Any]:
         """
@@ -426,36 +530,122 @@ class SupabaseSyncService:
         Returns:
             dict: Sync results
         """
+        # Check if already syncing to prevent duplicate requests
+        if self.is_syncing:
+            logger.warning("Sync already in progress - sync_all called again while syncing")
+            return {"status": "in_progress", "message": "Sync already in progress"}
+            
         if not self.auth_service.is_authenticated():
             logger.warning("Cannot sync: Not authenticated")
-            return {"status": "not_authenticated"}
+            return {"status": "not_authenticated", "message": "User not authenticated"}
             
+        # Reset error state
+        self.sync_failed = False
+        self.sync_error = None
+            
+        # Set global sync flag
         try:
+            # Set sync flag before starting
             self.is_syncing = True
+            logger.info("Starting full sync operation")
             
-            # Sync organization data first (pull)
-            org_result = await self.sync_organization_data()
+            # Track timing for diagnostics
+            start_time = datetime.now()
             
-            # Sync activity logs (push)
-            activity_result = await self.sync_activity_logs()
+            # Track individual component results
+            org_result = None
+            activity_result = None
+            screenshot_result = None
             
-            # Sync screenshots (push)
-            screenshot_result = await self.sync_screenshots()
-            
-            return {
-                "organization": org_result,
-                "activity_logs": activity_result,
-                "screenshots": screenshot_result,
-                "status": "complete"
-            }
-            
+            try:
+                # Sync organization data first (pull)
+                logger.info("Starting organization data sync")
+                org_start = datetime.now()
+                org_result = await self.sync_organization_data()
+                org_duration = (datetime.now() - org_start).total_seconds()
+                logger.info(f"Organization sync completed in {org_duration:.2f}s with status: {org_result.get('status', 'unknown')}")
+                
+                # If org sync failed completely, this might be why foreign key constraints fail
+                if org_result.get('status') == 'error':
+                    logger.error("Organization sync failed - this might cause issues with other sync operations")
+                
+                # Sync activity logs (push) only if not already syncing
+                # Each individual sync method has its own check for is_syncing
+                logger.info("Starting activity logs sync")
+                activity_start = datetime.now()
+                activity_result = await self.sync_activity_logs()
+                activity_duration = (datetime.now() - activity_start).total_seconds()
+                logger.info(f"Activity logs sync completed in {activity_duration:.2f}s with status: {activity_result.get('status', 'unknown')}")
+                
+                # Sync screenshots (push)
+                logger.info("Starting screenshots sync")
+                screenshot_start = datetime.now()
+                screenshot_result = await self.sync_screenshots()
+                screenshot_duration = (datetime.now() - screenshot_start).total_seconds()
+                logger.info(f"Screenshots sync completed in {screenshot_duration:.2f}s with status: {screenshot_result.get('status', 'unknown')}")
+                
+                # Calculate overall duration
+                total_duration = (datetime.now() - start_time).total_seconds()
+                
+                # Determine overall status
+                statuses = [
+                    org_result.get('status') if org_result else 'error',
+                    activity_result.get('status') if activity_result else 'error',
+                    screenshot_result.get('status') if screenshot_result else 'error'
+                ]
+                
+                overall_status = "complete"
+                if "error" in statuses:
+                    overall_status = "error"
+                elif "partial" in statuses:
+                    overall_status = "partial"
+                
+                logger.info(f"Full sync completed in {total_duration:.2f}s with status: {overall_status}")
+                
+                return {
+                    "organization": org_result,
+                    "activity_logs": activity_result,
+                    "screenshots": screenshot_result,
+                    "duration_seconds": total_duration,
+                    "status": overall_status
+                }
+                
+            except Exception as component_error:
+                # This catches errors in the individual sync operations
+                logger.error(f"Component sync error: {str(component_error)}")
+                import traceback
+                logger.error(f"Component sync traceback: {traceback.format_exc()}")
+                
+                # Set error state
+                self.sync_failed = True
+                self.sync_error = str(component_error)
+                
+                # Return partial results
+                return {
+                    "organization": org_result,
+                    "activity_logs": activity_result,
+                    "screenshots": screenshot_result,
+                    "error": str(component_error),
+                    "status": "error"
+                }
+                
         except Exception as e:
+            # This catches errors in the overall sync_all operation
             logger.error(f"Sync all error: {str(e)}")
+            import traceback
+            logger.error(f"Sync all traceback: {traceback.format_exc()}")
+            
+            # Set error state
             self.sync_failed = True
             self.sync_error = str(e)
-            return {"status": "error"}
+            return {
+                "status": "error", 
+                "message": f"Sync all error: {str(e)}"
+            }
             
         finally:
+            # Always reset sync flag
+            logger.info("Resetting sync flag")
             self.is_syncing = False
             
     async def _get_user_org_id(self, user_id: str) -> Optional[str]:

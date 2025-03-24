@@ -84,3 +84,10 @@ export const createOrganizationInvitation = (orgId: string, data: {
   email: string,
   role?: string
 }) => apiClient.post(`/organizations/${orgId}/invitations`, data);
+
+/**
+ * Clean up orphaned organization memberships that reference non-existent organizations
+ * @returns Cleanup results with count of removed orphaned memberships
+ */
+export const cleanupOrphanedMemberships = () => 
+  apiClient.post('/organizations/cleanup');
