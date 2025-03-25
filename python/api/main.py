@@ -70,10 +70,18 @@ async def startup_event():
     os.makedirs(os.path.join(os.path.expanduser("~"), "TimeTracker", "logs"), exist_ok=True)
     os.makedirs(os.path.join(os.path.expanduser("~"), "TimeTracker", "data"), exist_ok=True)
     
+    # Apply database extensions and patches
+    from utils.patch_loader import apply_patches_to_class
+    from services.database import DatabaseService
+    
+    # Apply database extensions for project task sync
+    apply_patches_to_class(DatabaseService, "database_extensions_patch")
+    
     # Initialize services
-    from api.dependencies import get_auth_service, get_sync_service
+    from api.dependencies import get_auth_service, get_sync_service, get_activity_service
     auth_service = get_auth_service()
     sync_service = get_sync_service()
+    activity_service = get_activity_service()
     
     # Initialize sync service
     try:
@@ -81,6 +89,13 @@ async def startup_event():
         logger.info("Sync service initialized successfully")
     except Exception as e:
         logger.error(f"Error initializing sync service: {str(e)}")
+        
+    # Initialize activity tracking service
+    try:
+        activity_service.start()
+        logger.info("Activity tracking service started successfully")
+    except Exception as e:
+        logger.error(f"Error starting activity tracking service: {str(e)}")
     
     logger.info("Time Tracker API started successfully")
 
@@ -88,6 +103,15 @@ async def startup_event():
 async def shutdown_event():
     """Clean up on shutdown"""
     logger.info("Shutting down Time Tracker API")
+    
+    # Stop the activity tracking service
+    try:
+        from api.dependencies import get_activity_service
+        activity_service = get_activity_service()
+        activity_service.stop()
+        logger.info("Activity tracking service stopped")
+    except Exception as e:
+        logger.error(f"Error stopping activity tracking service: {str(e)}")
 
 # Main execution
 if __name__ == "__main__":

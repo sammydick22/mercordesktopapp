@@ -59,26 +59,25 @@ class DatabaseService:
         import threading
         current_thread_id = threading.get_ident()
         
-        # Check if we're in the init thread
-        if current_thread_id == self._init_thread_id:
-            if self.conn is None:
-                self.conn = sqlite3.connect(self.db_path)
-                self.conn.execute("PRAGMA foreign_keys = ON")
-            return self.conn
-        
-        # For other threads, store connection in thread_local
-        if not hasattr(self._thread_local, 'conn'):
+        # For all threads, use thread_local storage
+        if not hasattr(self._thread_local, 'conn') or self._thread_local.conn is None:
             # Create a new connection for this thread
-            self._thread_local.conn = sqlite3.connect(self.db_path)
+            self._thread_local.conn = sqlite3.connect(self.db_path, timeout=20.0)
             # Enable foreign keys
             self._thread_local.conn.execute("PRAGMA foreign_keys = ON")
+            # Row factory for better column access
+            self._thread_local.conn.row_factory = sqlite3.Row
+            logger.debug(f"Created new database connection for thread {current_thread_id}")
             
         return self._thread_local.conn
     
     def _initialize_db(self) -> None:
         """Initialize the database by creating the connection and tables."""
         try:
-            # Connect to database using thread-safe method
+            # Create database directory if it doesn't exist
+            os.makedirs(self.db_dir, exist_ok=True)
+            
+            # Initialize connection using thread-safe method
             conn = self._get_connection()
             
             # Create tables if they don't exist
@@ -122,7 +121,7 @@ class DatabaseService:
             # Activity logs table
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS activity_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id TEXT PRIMARY KEY,
                 window_title TEXT NOT NULL,
                 process_name TEXT NOT NULL,
                 executable_path TEXT,
@@ -142,7 +141,7 @@ class DatabaseService:
                 id TEXT PRIMARY KEY,
                 filepath TEXT NOT NULL,
                 thumbnail_path TEXT NOT NULL,
-                activity_log_id INTEGER,
+                activity_log_id TEXT,
                 time_entry_id TEXT,
                 timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 synced BOOLEAN NOT NULL DEFAULT 0,
@@ -267,12 +266,15 @@ class DatabaseService:
             self._ensure_sync_status("system_metrics")
             
             # Commit changes
-            self.conn.commit()
+            conn.commit()
             
             logger.debug("Database tables created")
         except Exception as e:
             logger.error(f"Error creating tables: {str(e)}")
-            self.conn.rollback()
+            try:
+                conn.rollback()
+            except Exception:
+                logger.error("Could not rollback transaction - connection may be invalid")
             raise
             
     def _ensure_sync_status(self, entity_type: str) -> None:
@@ -301,11 +303,18 @@ class DatabaseService:
             )
             
     def close(self) -> None:
-        """Close the database connection."""
-        if self.conn:
-            self.conn.close()
-            self.conn = None
-            logger.debug("Database connection closed")
+        """Close the database connection for the current thread."""
+        import threading
+        current_thread_id = threading.get_ident()
+        
+        try:
+            # Close thread-local connection if it exists
+            if hasattr(self._thread_local, 'conn') and self._thread_local.conn:
+                self._thread_local.conn.close()
+                self._thread_local.conn = None
+                logger.debug(f"Database connection closed for thread {current_thread_id}")
+        except Exception as e:
+            logger.error(f"Error closing database connection: {str(e)}")
             
     def create_activity_log(self, window_title: str, process_name: str, executable_path: Optional[str] = None) -> Dict[str, Any]:
         """
@@ -319,34 +328,35 @@ class DatabaseService:
         Returns:
             dict: The created activity log
         """
+        conn = self._get_connection()
         try:
-            conn = self._get_connection()
             cursor = conn.cursor()
             
             # End any existing active activity
             self._end_active_activities()
             
+            # Generate UUID for the activity log
+            activity_id = str(uuid.uuid4())
+            now = datetime.now().isoformat()
+            
             # Create new activity log
             cursor.execute(
                 '''
                 INSERT INTO activity_logs 
-                (window_title, process_name, executable_path) 
-                VALUES (?, ?, ?)
+                (id, window_title, process_name, executable_path, start_time, created_at, updated_at) 
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ''',
-                (window_title, process_name, executable_path)
+                (activity_id, window_title, process_name, executable_path, now, now, now)
             )
             
-            # Get the created activity log
-            activity_id = cursor.lastrowid
-            
             # Commit changes
-            self.conn.commit()
+            conn.commit()
             
             # Return the created activity log
             return self.get_activity_log(activity_id)
         except Exception as e:
             logger.error(f"Error creating activity log: {str(e)}")
-            self.conn.rollback()
+            conn.rollback()
             raise
             
     def end_activity_log(self, activity_id: int) -> Dict[str, Any]:
@@ -426,13 +436,13 @@ class DatabaseService:
             )
             
             # Commit changes
-            self.conn.commit()
+            conn.commit()
             
             # Return the updated activity log
             return self.get_activity_log(activity_id)
         except Exception as e:
             logger.error(f"Error ending activity log: {str(e)}")
-            self.conn.rollback()
+            conn.rollback()
             raise
             
     def get_activity_log(self, activity_id: int) -> Dict[str, Any]:
@@ -446,7 +456,7 @@ class DatabaseService:
             dict: The activity log
         """
         try:
-            cursor = self.conn.cursor()
+            cursor = self._get_connection().cursor()
             
             # Get the activity log
             cursor.execute(
@@ -487,7 +497,7 @@ class DatabaseService:
             dict: The active activity log or empty dict if none
         """
         try:
-            cursor = self.conn.cursor()
+            cursor = self._get_connection().cursor()
             
             # Get the active activity log
             cursor.execute(
@@ -529,7 +539,7 @@ class DatabaseService:
         self,
         filepath: str,
         thumbnail_path: Optional[str] = None,
-        activity_log_id: Optional[int] = None
+        activity_log_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Create a new screenshot entry.
@@ -542,6 +552,7 @@ class DatabaseService:
         Returns:
             dict: The created screenshot
         """
+        conn = self._get_connection()
         try:
             # If activity_log_id not provided, try to get active activity
             if not activity_log_id:
@@ -549,29 +560,30 @@ class DatabaseService:
                 if active_activity:
                     activity_log_id = active_activity['id']
                     
-            cursor = self.conn.cursor()
+            cursor = conn.cursor()
+            
+            # Generate UUID for the screenshot
+            screenshot_id = str(uuid.uuid4())
+            now = datetime.now().isoformat()
             
             # Create new screenshot
             cursor.execute(
                 '''
                 INSERT INTO screenshots 
-                (filepath, thumbnail_path, activity_log_id) 
-                VALUES (?, ?, ?)
+                (id, filepath, thumbnail_path, activity_log_id, timestamp, created_at) 
+                VALUES (?, ?, ?, ?, ?, ?)
                 ''',
-                (filepath, thumbnail_path, activity_log_id)
+                (screenshot_id, filepath, thumbnail_path, activity_log_id, now, now)
             )
             
-            # Get the created screenshot
-            screenshot_id = cursor.lastrowid
-            
             # Commit changes
-            self.conn.commit()
+            conn.commit()
             
             # Return the created screenshot
             return self.get_screenshot(screenshot_id)
         except Exception as e:
             logger.error(f"Error creating screenshot: {str(e)}")
-            self.conn.rollback()
+            conn.rollback()
             raise
             
     def get_screenshot(self, screenshot_id: int) -> Dict[str, Any]:
@@ -585,7 +597,7 @@ class DatabaseService:
             dict: The screenshot
         """
         try:
-            cursor = self.conn.cursor()
+            cursor = self._get_connection().cursor()
             
             # Get the screenshot
             cursor.execute(
@@ -637,6 +649,7 @@ class DatabaseService:
         Returns:
             dict: The created system metric
         """
+        conn = self._get_connection()
         try:
             # If activity_log_id not provided, try to get active activity
             if not activity_log_id:
@@ -644,7 +657,7 @@ class DatabaseService:
                 if active_activity:
                     activity_log_id = active_activity['id']
                     
-            cursor = self.conn.cursor()
+            cursor = conn.cursor()
             
             # Create new system metric
             cursor.execute(
@@ -660,13 +673,13 @@ class DatabaseService:
             metric_id = cursor.lastrowid
             
             # Commit changes
-            self.conn.commit()
+            conn.commit()
             
             # Return the created system metric
             return self.get_system_metric(metric_id)
         except Exception as e:
             logger.error(f"Error creating system metric: {str(e)}")
-            self.conn.rollback()
+            conn.rollback()
             raise
             
     def get_system_metric(self, metric_id: int) -> Dict[str, Any]:
@@ -680,7 +693,7 @@ class DatabaseService:
             dict: The system metric
         """
         try:
-            cursor = self.conn.cursor()
+            cursor = self._get_connection().cursor()
             
             # Get the system metric
             cursor.execute(
@@ -735,7 +748,7 @@ class DatabaseService:
             list: List of activity logs
         """
         try:
-            cursor = self.conn.cursor()
+            cursor = self._get_connection().cursor()
             
             # Build query
             query = '''
@@ -808,7 +821,7 @@ class DatabaseService:
             list: List of screenshots
         """
         try:
-            cursor = self.conn.cursor()
+            cursor = self._get_connection().cursor()
             
             # Build query
             query = '''
@@ -883,7 +896,7 @@ class DatabaseService:
             list: List of system metrics
         """
         try:
-            cursor = self.conn.cursor()
+            cursor = self._get_connection().cursor()
             
             # Build query
             query = '''
@@ -947,23 +960,45 @@ class DatabaseService:
         Returns:
             bool: True if successful
         """
-        try:
-            cursor = self.conn.cursor()
-            
-            # Update the entity
-            cursor.execute(
-                f'UPDATE {entity_type} SET synced = 1 WHERE id = ?',
-                (entity_id,)
-            )
-            
-            # Commit changes
-            self.conn.commit()
-            
-            return True
-        except Exception as e:
-            logger.error(f"Error marking {entity_type} {entity_id} as synced: {str(e)}")
-            self.conn.rollback()
-            return False
+        conn = self._get_connection()
+        
+        # Retry up to 3 times if database is locked
+        max_retries = 3
+        retry_count = 0
+        
+        while retry_count < max_retries:
+            try:
+                cursor = conn.cursor()
+                
+                # Update the entity
+                cursor.execute(
+                    f'UPDATE {entity_type} SET synced = 1 WHERE id = ?',
+                    (entity_id,)
+                )
+                
+                # Commit changes
+                conn.commit()
+                
+                return True
+            except sqlite3.OperationalError as e:
+                if "database is locked" in str(e) and retry_count < max_retries - 1:
+                    retry_count += 1
+                    import time
+                    wait_time = 0.1 * (2 ** retry_count)  # Exponential backoff
+                    logger.warning(f"Database locked, retrying in {wait_time:.2f}s (attempt {retry_count}/{max_retries})")
+                    time.sleep(wait_time)
+                    
+                    # Get a fresh connection
+                    self._thread_local.conn = None
+                    conn = self._get_connection()
+                else:
+                    logger.error(f"Error marking {entity_type} {entity_id} as synced: {str(e)}")
+                    conn.rollback()
+                    return False
+            except Exception as e:
+                logger.error(f"Error marking {entity_type} {entity_id} as synced: {str(e)}")
+                conn.rollback()
+                return False
             
     def update_sync_status(self, entity_type: str, last_synced_id: int) -> bool:
         """
@@ -976,8 +1011,9 @@ class DatabaseService:
         Returns:
             bool: True if successful
         """
+        conn = self._get_connection()
         try:
-            cursor = self.conn.cursor()
+            cursor = conn.cursor()
             
             # Update the sync status
             cursor.execute(
@@ -990,12 +1026,12 @@ class DatabaseService:
             )
             
             # Commit changes
-            self.conn.commit()
+            conn.commit()
             
             return True
         except Exception as e:
             logger.error(f"Error updating sync status for {entity_type}: {str(e)}")
-            self.conn.rollback()
+            conn.rollback()
             return False
             
     def get_sync_status(self, entity_type: str) -> Dict[str, Any]:
@@ -1009,7 +1045,7 @@ class DatabaseService:
             dict: The sync status
         """
         try:
-            cursor = self.conn.cursor()
+            cursor = self._get_connection().cursor()
             
             # Get the sync status
             cursor.execute(
@@ -1066,7 +1102,7 @@ class DatabaseService:
             dict: Database statistics
         """
         try:
-            cursor = self.conn.cursor()
+            cursor = self._get_connection().cursor()
             
             # Get activity log counts
             cursor.execute('SELECT COUNT(*) FROM activity_logs')
@@ -1116,8 +1152,9 @@ class DatabaseService:
         Returns:
             list: Query results
         """
+        conn = self._get_connection()
         try:
-            cursor = self.conn.cursor()
+            cursor = conn.cursor()
             
             # Execute query
             cursor.execute(query, params)
@@ -1127,12 +1164,12 @@ class DatabaseService:
             
             # Commit if needed
             if query.strip().lower().startswith(('insert', 'update', 'delete')):
-                self.conn.commit()
+                conn.commit()
                 
             return results
         except Exception as e:
             logger.error(f"Error executing query: {str(e)}")
-            self.conn.rollback()
+            conn.rollback()
             return []
             
     def get_unsynchronized_activity_logs(self, last_id: int = 0) -> List[Dict[str, Any]]:
@@ -1146,7 +1183,7 @@ class DatabaseService:
             list: List of unsynchronized activity logs
         """
         try:
-            cursor = self.conn.cursor()
+            cursor = self._get_connection().cursor()
             
             # Build query
             query = '''
@@ -1189,7 +1226,7 @@ class DatabaseService:
             list: List of unsynchronized screenshots
         """
         try:
-            cursor = self.conn.cursor()
+            cursor = self._get_connection().cursor()
             
             # Build query
             query = '''
@@ -1219,6 +1256,284 @@ class DatabaseService:
             logger.error(f"Error getting unsynchronized screenshots: {str(e)}")
             return []
             
+    def get_unsynchronized_clients(self, last_id: str = "") -> List[Dict[str, Any]]:
+        """
+        Get unsynchronized clients.
+        
+        Args:
+            last_id: ID threshold to filter by (optional)
+            
+        Returns:
+            list: List of unsynchronized clients
+        """
+        try:
+            cursor = self._get_connection().cursor()
+            
+            # Build query conditions
+            conditions = ["synced = 0"]
+            params = []
+            
+            if last_id:
+                conditions.append("id > ?")
+                params.append(last_id)
+            
+            # Build query
+            query = f'''
+            SELECT 
+                id, name, contact_name, email, phone, address, notes,
+                is_active, synced, created_at, updated_at, user_id
+            FROM clients 
+            WHERE {" AND ".join(conditions)}
+            ORDER BY id ASC
+            LIMIT 100
+            '''
+            
+            # Execute query
+            cursor.execute(query, params)
+            
+            # Get results
+            results = cursor.fetchall()
+            
+            # Convert to list of dictionaries
+            column_names = [
+                'id', 'name', 'contact_name', 'email', 'phone', 
+                'address', 'notes', 'is_active', 'synced', 
+                'created_at', 'updated_at', 'user_id'
+            ]
+            
+            return [dict(zip(column_names, row)) for row in results]
+        except Exception as e:
+            logger.error(f"Error getting unsynchronized clients: {str(e)}")
+            return []
+            
+    def get_unsynchronized_projects(self, last_id: str = "") -> List[Dict[str, Any]]:
+        """
+        Get unsynchronized projects.
+        
+        Args:
+            last_id: ID threshold to filter by (optional)
+            
+        Returns:
+            list: List of unsynchronized projects
+        """
+        try:
+            cursor = self._get_connection().cursor()
+            
+            # Build query conditions
+            conditions = ["synced = 0"]
+            params = []
+            
+            if last_id:
+                conditions.append("id > ?")
+                params.append(last_id)
+            
+            # Build query
+            query = f'''
+            SELECT 
+                id, name, client_id, description, color, 
+                hourly_rate, is_billable, is_active, user_id, 
+                synced, created_at, updated_at
+            FROM projects 
+            WHERE {" AND ".join(conditions)}
+            ORDER BY id ASC
+            LIMIT 100
+            '''
+            
+            # Execute query
+            cursor.execute(query, params)
+            
+            # Get results
+            results = cursor.fetchall()
+            
+            # Convert to list of dictionaries
+            column_names = [
+                'id', 'name', 'client_id', 'description', 'color',
+                'hourly_rate', 'is_billable', 'is_active', 'user_id',
+                'synced', 'created_at', 'updated_at'
+            ]
+            
+            return [dict(zip(column_names, row)) for row in results]
+        except Exception as e:
+            logger.error(f"Error getting unsynchronized projects: {str(e)}")
+            return []
+            
+    def get_unsynchronized_time_entries(self, last_id: str = "") -> List[Dict[str, Any]]:
+        """
+        Get unsynchronized time entries.
+        
+        Args:
+            last_id: ID threshold to filter by (optional)
+            
+        Returns:
+            list: List of unsynchronized time entries
+        """
+        try:
+            cursor = self._get_connection().cursor()
+            
+            # Build query conditions
+            conditions = ["synced = 0"]
+            params = []
+            
+            if last_id:
+                conditions.append("id > ?")
+                params.append(last_id)
+            
+            # Build query
+            query = f'''
+            SELECT 
+                id, start_time, end_time, duration, project_id,
+                task_id, description, is_active, synced,
+                created_at, updated_at, user_id
+            FROM time_entries 
+            WHERE {" AND ".join(conditions)}
+            ORDER BY id ASC
+            LIMIT 100
+            '''
+            
+            # Execute query
+            cursor.execute(query, params)
+            
+            # Get results
+            results = cursor.fetchall()
+            
+            # Convert to list of dictionaries
+            column_names = [
+                'id', 'start_time', 'end_time', 'duration', 'project_id',
+                'task_id', 'description', 'is_active', 'synced',
+                'created_at', 'updated_at', 'user_id'
+            ]
+            
+            return [dict(zip(column_names, row)) for row in results]
+        except Exception as e:
+            logger.error(f"Error getting unsynchronized time entries: {str(e)}")
+            return []
+            
+    def get_unsynchronized_tasks(self, last_id: str = "") -> List[Dict[str, Any]]:
+        """
+        Get unsynchronized tasks.
+        
+        Args:
+            last_id: ID threshold to filter by (optional)
+            
+        Returns:
+            list: List of unsynchronized tasks
+        """
+        try:
+            cursor = self._get_connection().cursor()
+            
+            # Build query conditions
+            conditions = ["synced = 0"]
+            params = []
+            
+            if last_id:
+                conditions.append("id > ?")
+                params.append(last_id)
+            
+            # Build query
+            query = f'''
+            SELECT 
+                id, name, project_id, description, is_completed,
+                due_date, is_active, synced, created_at, updated_at, user_id
+            FROM tasks 
+            WHERE {" AND ".join(conditions)}
+            ORDER BY id ASC
+            LIMIT 100
+            '''
+            
+            # Execute query with error handling
+            try:
+                cursor.execute(query, params)
+                
+                # Get results
+                results = cursor.fetchall()
+                
+                # Convert to list of dictionaries
+                column_names = [
+                    'id', 'name', 'project_id', 'description', 'is_completed',
+                    'due_date', 'is_active', 'synced', 'created_at', 'updated_at', 'user_id'
+                ]
+                
+                return [dict(zip(column_names, row)) for row in results]
+            except sqlite3.OperationalError as e:
+                if "no such table: tasks" in str(e):
+                    logger.warning("Tasks table doesn't exist yet. Creating it...")
+                    self._create_tasks_table()
+                    return []
+                else:
+                    raise
+                    
+        except Exception as e:
+            logger.error(f"Error getting unsynchronized tasks: {str(e)}")
+            return []
+            
+    def _create_tasks_table(self) -> None:
+        """Create tasks table if it doesn't exist."""
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            
+            # Tasks table
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS tasks (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                project_id TEXT,
+                description TEXT,
+                is_completed BOOLEAN NOT NULL DEFAULT 0,
+                due_date TIMESTAMP,
+                is_active BOOLEAN NOT NULL DEFAULT 1,
+                synced BOOLEAN NOT NULL DEFAULT 0,
+                created_at TIMESTAMP NOT NULL,
+                updated_at TIMESTAMP NOT NULL,
+                user_id TEXT NOT NULL,
+                FOREIGN KEY (project_id) REFERENCES projects(id)
+            )
+            ''')
+            
+            # Create indices
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_tasks_project_id ON tasks(project_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_tasks_synced ON tasks(synced)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id)')
+            
+            # Commit changes
+            conn.commit()
+            
+            logger.info("Tasks table created successfully")
+        except Exception as e:
+            logger.error(f"Error creating tasks table: {str(e)}")
+            conn.rollback()
+            raise
+            
+    def update_task_sync_status(self, task_id: str, synced: bool) -> bool:
+        """
+        Update the sync status of a task.
+        
+        Args:
+            task_id: ID of the task
+            synced: Sync status to set
+            
+        Returns:
+            bool: True if successful
+        """
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            
+            # Update the task sync status
+            cursor.execute(
+                'UPDATE tasks SET synced = ? WHERE id = ?',
+                (1 if synced else 0, task_id)
+            )
+            
+            # Commit changes
+            conn.commit()
+            
+            return True
+        except Exception as e:
+            logger.error(f"Error updating task sync status: {str(e)}")
+            conn.rollback()
+            return False
+            
     def update_activity_log_sync_status(self, activity_id: int, synced: bool) -> bool:
         """
         Update the sync status of an activity log.
@@ -1244,6 +1559,96 @@ class DatabaseService:
             bool: True if successful
         """
         return self.mark_synced('screenshots', screenshot_id) if synced else False
+        
+    def update_client_sync_status(self, client_id: str, synced: bool) -> bool:
+        """
+        Update the sync status of a client.
+        
+        Args:
+            client_id: ID of the client
+            synced: Sync status to set
+            
+        Returns:
+            bool: True if successful
+        """
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            
+            # Update the client sync status
+            cursor.execute(
+                'UPDATE clients SET synced = ? WHERE id = ?',
+                (1 if synced else 0, client_id)
+            )
+            
+            # Commit changes
+            conn.commit()
+            
+            return True
+        except Exception as e:
+            logger.error(f"Error updating client sync status: {str(e)}")
+            conn.rollback()
+            return False
+            
+    def update_project_sync_status(self, project_id: str, synced: bool) -> bool:
+        """
+        Update the sync status of a project.
+        
+        Args:
+            project_id: ID of the project
+            synced: Sync status to set
+            
+        Returns:
+            bool: True if successful
+        """
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            
+            # Update the project sync status
+            cursor.execute(
+                'UPDATE projects SET synced = ? WHERE id = ?',
+                (1 if synced else 0, project_id)
+            )
+            
+            # Commit changes
+            conn.commit()
+            
+            return True
+        except Exception as e:
+            logger.error(f"Error updating project sync status: {str(e)}")
+            conn.rollback()
+            return False
+            
+    def update_time_entry_sync_status(self, time_entry_id: str, synced: bool) -> bool:
+        """
+        Update the sync status of a time entry.
+        
+        Args:
+            time_entry_id: ID of the time entry
+            synced: Sync status to set
+            
+        Returns:
+            bool: True if successful
+        """
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            
+            # Update the time entry sync status
+            cursor.execute(
+                'UPDATE time_entries SET synced = ? WHERE id = ?',
+                (1 if synced else 0, time_entry_id)
+            )
+            
+            # Commit changes
+            conn.commit()
+            
+            return True
+        except Exception as e:
+            logger.error(f"Error updating time entry sync status: {str(e)}")
+            conn.rollback()
+            return False
             
     def save_organization_data(self, org_data: Dict[str, Any]) -> bool:
         """
@@ -1255,8 +1660,9 @@ class DatabaseService:
         Returns:
             bool: True if successful
         """
+        conn = self._get_connection()
         try:
-            cursor = self.conn.cursor()
+            cursor = conn.cursor()
             
             # Check if organization exists
             cursor.execute(
@@ -1299,12 +1705,12 @@ class DatabaseService:
                 )
                 
             # Commit changes
-            self.conn.commit()
+            conn.commit()
             
             return True
         except Exception as e:
             logger.error(f"Error saving organization data: {str(e)}")
-            self.conn.rollback()
+            conn.rollback()
             return False
             
     def save_org_membership(self, membership_data: Dict[str, Any]) -> bool:
@@ -1317,8 +1723,9 @@ class DatabaseService:
         Returns:
             bool: True if successful
         """
+        conn = self._get_connection()
         try:
-            cursor = self.conn.cursor()
+            cursor = conn.cursor()
             
             # Log membership data
             logger.info(f"Processing membership data: {json.dumps(membership_data)}")
@@ -1418,18 +1825,18 @@ class DatabaseService:
                         else:
                             logger.error(f"Organization with ID '{membership_data['org_id']}' definitely does not exist")
                     
-                    self.conn.rollback()
+                    conn.rollback()
                     return False
                 
             # Commit changes
-            self.conn.commit()
+            conn.commit()
             logger.info(f"Successfully saved membership for org '{membership_data['org_id']}', user '{membership_data['user_id']}'")
             
             return True
         except Exception as e:
             logger.error(f"Error saving organization membership: {str(e)}")
             logger.error(f"Membership data: {json.dumps(membership_data)}")
-            self.conn.rollback()
+            conn.rollback()
             return False
             
     def get_user_org_membership(self, user_id: str) -> Optional[Dict[str, Any]]:
@@ -1443,7 +1850,7 @@ class DatabaseService:
             dict: Organization membership or None if not found
         """
         try:
-            cursor = self.conn.cursor()
+            cursor = self._get_connection().cursor()
             
             # Get user's organization membership
             cursor.execute(
@@ -1482,7 +1889,7 @@ class DatabaseService:
             list: List of organization memberships
         """
         try:
-            cursor = self.conn.cursor()
+            cursor = self._get_connection().cursor()
             
             # Get all user's organization memberships
             cursor.execute(
@@ -1517,8 +1924,9 @@ class DatabaseService:
         Returns:
             dict: Cleanup results with counts
         """
+        conn = self._get_connection()
         try:
-            cursor = self.conn.cursor()
+            cursor = conn.cursor()
             
             # Find orphaned memberships
             cursor.execute(
@@ -1552,7 +1960,7 @@ class DatabaseService:
                     '''
                 )
                 
-                self.conn.commit()
+                conn.commit()
                 logger.info(f"Successfully cleaned up {orphaned_count} orphaned memberships")
             else:
                 logger.info("No orphaned memberships found")
@@ -1564,7 +1972,7 @@ class DatabaseService:
             
         except Exception as e:
             logger.error(f"Error cleaning up orphaned memberships: {str(e)}")
-            self.conn.rollback()
+            conn.rollback()
             
             return {
                 "orphaned_count": 0,
@@ -1582,8 +1990,9 @@ class DatabaseService:
         Returns:
             bool: True if successful
         """
+        conn = self._get_connection()
         try:
-            cursor = self.conn.cursor()
+            cursor = conn.cursor()
             
             # Find memberships for the organization
             cursor.execute(
@@ -1613,14 +2022,14 @@ class DatabaseService:
                 (org_id,)
             )
             
-            self.conn.commit()
+            conn.commit()
             logger.info(f"Successfully removed {len(memberships)} memberships for organization: {org_id}")
             
             return True
             
         except Exception as e:
             logger.error(f"Error removing membership for organization {org_id}: {str(e)}")
-            self.conn.rollback()
+            conn.rollback()
             return False
 
     # Client CRUD operations
@@ -1637,7 +2046,7 @@ class DatabaseService:
             list: List of clients
         """
         try:
-            cursor = self.conn.cursor()
+            cursor = self._get_connection().cursor()
             
             # Build base query conditions
             conditions = []
@@ -1701,7 +2110,7 @@ class DatabaseService:
             dict: The client
         """
         try:
-            cursor = self.conn.cursor()
+            cursor = self._get_connection().cursor()
             
             # Get the client
             cursor.execute(
@@ -1732,56 +2141,92 @@ class DatabaseService:
             logger.error(f"Error getting client: {str(e)}")
             return {}
             
-    def create_client(self, client_data: Dict[str, Any], user_id: str) -> Dict[str, Any]:
+    def create_client(self, name: str, user_id: str, **kwargs) -> Dict[str, Any]:
         """
         Create a new client.
         
         Args:
-            client_data: Client data
+            name: Name of the client
             user_id: ID of the user creating the client
+            **kwargs: Additional client data (contact_name, email, phone, address, notes)
             
         Returns:
             dict: The created client
         """
-        try:
-            cursor = self.conn.cursor()
-            
-            # Generate ID and timestamps
-            client_id = str(uuid.uuid4())
-            now = datetime.now().isoformat()
-            
-            # Insert client
-            cursor.execute(
-                '''
-                INSERT INTO clients
-                (id, name, contact_name, email, phone, address, notes, 
-                is_active, created_at, updated_at, user_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''',
-                (
-                    client_id,
-                    client_data.get('name', ''),
-                    client_data.get('contact_name'),
-                    client_data.get('email'),
-                    client_data.get('phone'),
-                    client_data.get('address'),
-                    client_data.get('notes'),
-                    1,  # is_active = True
-                    now,
-                    now,
-                    user_id
+        conn = self._get_connection()
+        
+        # Retry up to 3 times if database is locked
+        max_retries = 3
+        retry_count = 0
+        
+        while retry_count < max_retries:
+            try:
+                cursor = conn.cursor()
+                
+                # Generate ID and timestamps
+                client_id = str(uuid.uuid4())
+                now = datetime.now().isoformat()
+                
+                # Extract known fields from kwargs
+                contact_name = kwargs.get('contact_name')
+                email = kwargs.get('email')
+                phone = kwargs.get('phone')
+                address = kwargs.get('address')
+                notes = kwargs.get('notes')
+                is_active = kwargs.get('is_active', 1)  # Default to active
+                
+                # Insert client
+                cursor.execute(
+                    '''
+                    INSERT INTO clients
+                    (id, name, contact_name, email, phone, address, notes, 
+                    is_active, created_at, updated_at, user_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''',
+                    (
+                        client_id,
+                        name,
+                        contact_name,
+                        email,
+                        phone,
+                        address,
+                        notes,
+                        is_active,
+                        now,
+                        now,
+                        user_id
+                    )
                 )
-            )
-            
-            # Commit changes
-            self.conn.commit()
-            
-            # Return the created client
-            return self.get_client(client_id)
-        except Exception as e:
-            logger.error(f"Error creating client: {str(e)}")
-            self.conn.rollback()
-            return {}
+                
+                # Commit changes
+                conn.commit()
+                
+                # Return the created client
+                return self.get_client(client_id)
+                
+            except sqlite3.OperationalError as e:
+                if "database is locked" in str(e) and retry_count < max_retries - 1:
+                    retry_count += 1
+                    import time
+                    wait_time = 0.1 * (2 ** retry_count)  # Exponential backoff
+                    logger.warning(f"Database locked, retrying in {wait_time:.2f}s (attempt {retry_count}/{max_retries})")
+                    time.sleep(wait_time)
+                    
+                    # Get a fresh connection
+                    self._thread_local.conn = None
+                    conn = self._get_connection()
+                else:
+                    logger.error(f"Error creating client: {str(e)}")
+                    conn.rollback()
+                    return {}
+            except Exception as e:
+                logger.error(f"Error creating client: {str(e)}")
+                conn.rollback()
+                return {}
+                
+        # If we get here, all retries failed
+        logger.error(f"Failed to create client after {max_retries} attempts due to database locks")
+        return {}
             
     def update_client(self, client_id: str, client_data: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -1794,8 +2239,9 @@ class DatabaseService:
         Returns:
             dict: The updated client
         """
+        conn = self._get_connection()
         try:
-            cursor = self.conn.cursor()
+            cursor = conn.cursor()
             
             # Get the client to check if it exists
             client = self.get_client(client_id)
@@ -1830,13 +2276,13 @@ class DatabaseService:
             )
             
             # Commit changes
-            self.conn.commit()
+            conn.commit()
             
             # Return the updated client
             return self.get_client(client_id)
         except Exception as e:
             logger.error(f"Error updating client: {str(e)}")
-            self.conn.rollback()
+            conn.rollback()
             return {}
             
     def delete_client(self, client_id: str) -> bool:
@@ -1849,8 +2295,9 @@ class DatabaseService:
         Returns:
             bool: True if successful
         """
+        conn = self._get_connection()
         try:
-            cursor = self.conn.cursor()
+            cursor = conn.cursor()
             
             # Get the client to check if it exists
             client = self.get_client(client_id)
@@ -1867,12 +2314,12 @@ class DatabaseService:
             )
             
             # Commit changes
-            self.conn.commit()
+            conn.commit()
             
             return True
         except Exception as e:
             logger.error(f"Error deleting client: {str(e)}")
-            self.conn.rollback()
+            conn.rollback()
             return False
             
     # Time entries CRUD operations
@@ -1895,11 +2342,12 @@ class DatabaseService:
         Returns:
             dict: The created time entry
         """
+        conn = self._get_connection()
         try:
             # End any active time entry first
             self.end_active_time_entries(user_id)
             
-            cursor = self.conn.cursor()
+            cursor = conn.cursor()
             
             # Generate ID and timestamps
             time_entry_id = str(uuid.uuid4())
@@ -1926,13 +2374,13 @@ class DatabaseService:
             )
             
             # Commit changes
-            self.conn.commit()
+            conn.commit()
             
             # Return the created time entry
             return self.get_time_entry(time_entry_id)
         except Exception as e:
             logger.error(f"Error creating time entry: {str(e)}")
-            self.conn.rollback()
+            conn.rollback()
             return {}
             
     def get_time_entry(self, time_entry_id: str) -> Dict[str, Any]:
@@ -1946,7 +2394,7 @@ class DatabaseService:
             dict: The time entry
         """
         try:
-            cursor = self.conn.cursor()
+            cursor = self._get_connection().cursor()
             
             # Get the time entry
             cursor.execute(
@@ -1990,7 +2438,7 @@ class DatabaseService:
             dict: The active time entry or empty dict if none
         """
         try:
-            cursor = self.conn.cursor()
+            cursor = self._get_connection().cursor()
             
             # Get the active time entry
             cursor.execute(
@@ -2033,8 +2481,9 @@ class DatabaseService:
         Returns:
             dict: The updated time entry
         """
+        conn = self._get_connection()
         try:
-            cursor = self.conn.cursor()
+            cursor = conn.cursor()
             
             # Get the time entry to check if it's active
             time_entry = self.get_time_entry(time_entry_id)
@@ -2088,13 +2537,13 @@ class DatabaseService:
             )
             
             # Commit changes
-            self.conn.commit()
+            conn.commit()
             
             # Return the updated time entry
             return self.get_time_entry(time_entry_id)
         except Exception as e:
             logger.error(f"Error ending time entry: {str(e)}")
-            self.conn.rollback()
+            conn.rollback()
             return {}
             
     def end_active_time_entries(self, user_id: str) -> bool:
@@ -2140,7 +2589,7 @@ class DatabaseService:
             dict: Dictionary with total count and list of time entries
         """
         try:
-            cursor = self.conn.cursor()
+            cursor = self._get_connection().cursor()
             
             # Build base query conditions
             conditions = ["user_id = ?"]

@@ -7,8 +7,7 @@ from datetime import datetime
 import logging
 import uuid
 
-from api.dependencies import get_current_user
-from services.database import DatabaseService
+from api.dependencies import get_current_user, get_db_service
 
 # Setup logger
 logger = logging.getLogger(__name__)
@@ -20,8 +19,8 @@ router = APIRouter(
     responses={404: {"description": "Not found"}},
 )
 
-# Create database service
-db_service = DatabaseService()
+# Get database service singleton
+db_service = get_db_service()
 
 # Initialize database tables if needed
 def initialize_db():

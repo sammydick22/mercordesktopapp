@@ -1,63 +1,83 @@
 """
-Reset the sync state for activity logs to ensure all logs are synced.
+Script to reset the sync state for specific data types in the TimeTracker application.
+This will force a full resync of the specified data types.
 """
 import os
 import json
 import logging
+from pathlib import Path
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-def reset_activity_logs_sync_state():
-    """Reset the activity logs sync state to 0."""
+def reset_sync_state(data_types=None):
+    """
+    Reset the sync state for specific data types or all if not specified.
+    
+    Args:
+        data_types: List of data types to reset ('screenshots', 'project_tasks', etc.)
+                   If None, resets all data types.
+    
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    # Path to the sync state file
+    config_dir = os.path.expanduser("~/TimeTracker/data")
+    sync_file = os.path.join(config_dir, "sync_state.json")
+    
     try:
-        # Path to the sync state file
-        config_dir = os.path.expanduser("~/TimeTracker/data")
-        sync_file = os.path.join(config_dir, "sync_state.json")
-        
-        logger.info(f"Checking sync state file at: {sync_file}")
-        
+        # Check if sync state file exists
         if not os.path.exists(sync_file):
-            logger.warning("Sync state file does not exist, nothing to reset")
+            logger.warning(f"Sync state file not found at: {sync_file}")
+            print(f"⚠️ Sync state file not found at: {sync_file}")
             return False
-        
-        # Load the current sync state
+            
+        # Load current sync state
         with open(sync_file, "r") as f:
             sync_state = json.load(f)
-        
-        # Log the current state
-        logger.info(f"Current sync state: {sync_state}")
-        
-        # Check if activity_logs section exists
-        if "activity_logs" not in sync_state:
-            logger.warning("No activity_logs entry in sync state, nothing to reset")
-            return False
-        
-        # Save the current last_id for reporting
-        old_last_id = sync_state["activity_logs"].get("last_id", None)
-        
-        # Reset the activity_logs section
-        sync_state["activity_logs"] = {
-            "last_id": 0,
-            "last_time": None
-        }
-        
-        # Save the updated sync state
+            
+        # Create backup of current sync state
+        backup_file = sync_file + ".bak"
+        with open(backup_file, "w") as f:
+            json.dump(sync_state, f, indent=2)
+            logger.info(f"Created sync state backup at: {backup_file}")
+            print(f"✅ Created sync state backup at: {backup_file}")
+            
+        # Reset specified data types or all
+        if data_types is None:
+            # Reset all sync state
+            sync_state = {}
+            logger.info("Reset all sync state")
+            print("✅ Reset all sync state")
+        else:
+            # Reset only specified data types
+            for data_type in data_types:
+                if data_type in sync_state:
+                    del sync_state[data_type]
+                    logger.info(f"Reset sync state for: {data_type}")
+                    print(f"✅ Reset sync state for: {data_type}")
+                else:
+                    logger.info(f"No sync state found for: {data_type}")
+                    print(f"ℹ️ No sync state found for: {data_type}")
+                    
+        # Save updated sync state
         with open(sync_file, "w") as f:
-            json.dump(sync_state, f)
-        
-        logger.info(f"Reset activity logs sync state from {old_last_id} to 0")
+            json.dump(sync_state, f, indent=2)
+            
+        logger.info("Sync state reset complete")
+        print("✅ Sync state reset complete")
         return True
-    
+        
     except Exception as e:
         logger.error(f"Error resetting sync state: {str(e)}")
+        print(f"❌ Error resetting sync state: {str(e)}")
         return False
 
 if __name__ == "__main__":
-    logger.info("=== RESETTING ACTIVITY LOGS SYNC STATE ===")
-    success = reset_activity_logs_sync_state()
-    logger.info(f"Reset {'successful' if success else 'failed'}")
+    print("Resetting TimeTracker sync state for screenshots and project_tasks...")
+    reset_sync_state(['screenshots', 'project_tasks'])
+    print("Done! Next sync operation will resync all screenshots and project tasks.")

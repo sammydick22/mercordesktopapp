@@ -8,6 +8,7 @@ from typing import Optional
 from services.supabase_auth import SupabaseAuthService
 from services.improved_sync import ImprovedSupabaseSyncService
 from services.database import DatabaseService
+from services.activity import ActivityTrackingService
 
 # Security scheme
 security = HTTPBearer()
@@ -16,6 +17,7 @@ security = HTTPBearer()
 _auth_service = None
 _sync_service = None
 _db_service = None
+_activity_service = None
 
 def get_db_service():
     """Get database service singleton."""
@@ -39,6 +41,14 @@ def get_sync_service():
         auth_service = get_auth_service()
         _sync_service = ImprovedSupabaseSyncService(db_service, auth_service)
     return _sync_service
+
+def get_activity_service():
+    """Get activity tracking service singleton."""
+    global _activity_service
+    if _activity_service is None:
+        db_service = get_db_service()
+        _activity_service = ActivityTrackingService(database=db_service)
+    return _activity_service
 
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security),
                           auth_service: SupabaseAuthService = Depends(get_auth_service)):

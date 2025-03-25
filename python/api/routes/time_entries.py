@@ -21,7 +21,7 @@ router = APIRouter(
 )
 
 # Use dependency injection for database service
-from api.dependencies import get_db_service
+from api.dependencies import get_db_service, get_activity_service
 
 @router.post("/start")
 async def start_time_entry(
@@ -30,7 +30,8 @@ async def start_time_entry(
     task_id: Optional[str] = None,
     description: Optional[str] = None,
     current_user: Dict[str, Any] = Depends(get_current_user),
-    db_service: DatabaseService = Depends(get_db_service)
+    db_service: DatabaseService = Depends(get_db_service),
+    activity_service = Depends(get_activity_service)
 ):
     """
     Start a new time entry.
@@ -64,6 +65,27 @@ async def start_time_entry(
     if not time_entry:
         raise HTTPException(status_code=500, detail="Failed to create time entry")
     
+    # Create an activity log for this time entry
+    try:
+        # Prepare window info with time entry information
+        window_title = description or f"Time Entry {time_entry['id']}"
+        process_name = "TimeTracker"
+        
+        # Resume activity tracking if needed
+        activity_service.resume()
+        
+        # Create activity log by simulating a window change
+        window_info = {
+            "window_title": window_title,
+            "process_name": process_name,
+            "executable_path": "TimeTracker"
+        }
+        activity_service._on_active_window_changed(window_info)
+        
+        logger.info(f"Created activity log for time entry {time_entry['id']}")
+    except Exception as e:
+        logger.error(f"Error creating activity log: {str(e)}")
+    
     # Add background task to start screenshot capturing
     # This would be implemented with the screenshot service
     # background_tasks.add_task(start_screenshot_capturing, time_entry["id"])
@@ -76,7 +98,8 @@ async def start_time_entry(
 async def stop_time_entry(
     description: Optional[str] = None,
     current_user: Dict[str, Any] = Depends(get_current_user),
-    db_service: DatabaseService = Depends(get_db_service)
+    db_service: DatabaseService = Depends(get_db_service),
+    activity_service = Depends(get_activity_service)
 ):
     """
     Stop the active time entry.
@@ -101,6 +124,14 @@ async def stop_time_entry(
     updated_entry = db_service.end_time_entry(active_entry["id"], description)
     if not updated_entry:
         raise HTTPException(status_code=500, detail="Failed to stop time entry")
+    
+    # Pause activity tracking to end the current activity
+    try:
+        # This will end the current activity log
+        activity_service.pause()
+        logger.info(f"Paused activity tracking for time entry {updated_entry['id']}")
+    except Exception as e:
+        logger.error(f"Error pausing activity tracking: {str(e)}")
     
     logger.info(f"Stopped time entry {updated_entry['id']} for user {user_id}")
     

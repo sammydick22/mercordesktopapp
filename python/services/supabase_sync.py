@@ -5,6 +5,7 @@ import logging
 import os
 import json
 import asyncio
+import uuid
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 
@@ -335,6 +336,10 @@ class SupabaseSyncService:
             # Get unsynchronized screenshots
             screenshots = self.db_service.get_unsynchronized_screenshots(last_sync_id)
             
+            # Add detailed logging to help diagnose the issue
+            logger.info(f"Looking for unsynchronized screenshots after ID {last_sync_id}")
+            logger.info(f"Found {len(screenshots) if screenshots else 0} unsynchronized screenshots")
+            
             if not screenshots:
                 logger.info("No screenshots to sync")
                 self.is_syncing = False
@@ -378,15 +383,20 @@ class SupabaseSyncService:
                         thumbnail_url = storage_client.get_public_url(thumbnail_path)
                     
                     # Create screenshot record in Supabase
+                    # Note: In Supabase, screenshots.id is actually UUID, not BIGSERIAL as in schema file
                     screenshot_record = {
+                        "id": screenshot["id"],  # Include the UUID directly
                         "user_id": user_id,
                         "org_id": org_id,
-                        # Don't include activity_log_id if it's a local numeric ID (Supabase expects UUID)
                         "image_url": storage_client.get_public_url(storage_path),
                         "thumbnail_url": thumbnail_url,
                         "taken_at": screenshot.get("timestamp") or datetime.now().isoformat(),
                         "client_created_at": screenshot.get("created_at") or datetime.now().isoformat()
                     }
+                    
+                    # Add activity_log_id only if it's valid UUID
+                    if screenshot.get("activity_log_id") and self._is_valid_uuid(screenshot["activity_log_id"]):
+                        screenshot_record["activity_log_id"] = screenshot["activity_log_id"]
                     
                     # Insert screenshot record using Supabase client
                     result = self.supabase.table("screenshots").insert(screenshot_record).execute()
@@ -601,6 +611,537 @@ class SupabaseSyncService:
             logger.error(f"Traceback: {traceback.format_exc()}")
             return {"status": "error", "message": f"Sync error: {str(e)}"}
             
+    async def sync_clients(self) -> Dict[str, Any]:
+        """
+        Synchronize clients from local database to Supabase.
+        
+        Returns:
+            dict: Sync results with counts and status
+        """
+        if not self.supabase:
+            logger.error("Supabase client not initialized")
+            return {"synced": 0, "failed": 0, "status": "error"}
+            
+        if not self.auth_service.is_authenticated():
+            logger.warning("Cannot sync clients: Not authenticated")
+            return {"synced": 0, "failed": 0, "status": "not_authenticated"}
+            
+        try:
+            # Only set is_syncing flag when called directly (not from sync_all)
+            if not self.is_syncing:
+                self.is_syncing = True
+            self.sync_failed = False
+            self.sync_error = None
+            
+            # Get user and organization data
+            user_id = self.auth_service.user.get("id")
+            org_id = await self._get_user_org_id(user_id)
+            
+            if not org_id:
+                logger.warning("Cannot sync clients: No organization found")
+                self.is_syncing = False
+                return {"synced": 0, "failed": 0, "status": "no_organization"}
+            
+            # Get unsynchronized clients
+            clients = self.db_service.get_unsynchronized_clients()
+            
+            if not clients:
+                logger.info("No clients to sync")
+                return {"synced": 0, "failed": 0, "status": "no_data"}
+            
+            logger.info(f"Syncing {len(clients)} clients")
+            
+            # Prepare clients for Supabase with proper field validation
+            supabase_clients = []
+            local_id_map = {}  # For tracking which local ID maps to which batch record
+            skipped_clients = 0
+            
+            for client in clients:
+                try:
+                    # Validate user_id is a proper UUID - skip records with invalid user IDs
+                    if not client.get("user_id") or not self._is_valid_uuid(client["user_id"]):
+                        logger.warning(f"Skipping client {client.get('id')} with invalid user_id: {client.get('user_id')}")
+                        skipped_clients += 1
+                        continue
+                    
+                    # Build a valid Supabase record
+                    supabase_record = {
+                        "id": client["id"],  # Use the same UUID
+                        "name": client["name"],
+                        "user_id": client["user_id"], # This must be a valid UUID
+                        "org_id": org_id,  # Add organization ID for Supabase RLS
+                        "created_at": client.get("created_at") or datetime.now().isoformat(),
+                        "updated_at": client.get("updated_at") or datetime.now().isoformat(),
+                        "is_active": client.get("is_active", 1) == 1,  # Convert to boolean
+                    }
+                    
+                    # Add optional fields only if they exist
+                    for field in ["contact_name", "email", "phone", "address", "notes"]:
+                        if client.get(field) is not None:
+                            supabase_record[field] = client[field]
+                    
+                    # Store the record and mapping
+                    supabase_clients.append(supabase_record)
+                    local_id_map[len(supabase_clients) - 1] = client["id"]
+                    
+                except Exception as e:
+                    logger.error(f"Error preparing client {client.get('id')}: {str(e)}")
+                    continue
+            
+            # Split into batches to avoid request size limits
+            batch_size = 20
+            batches = [supabase_clients[i:i + batch_size] for i in range(0, len(supabase_clients), batch_size)]
+            
+            synced_count = 0
+            failed_count = 0
+            
+            for batch_index, batch in enumerate(batches):
+                try:
+                    logger.info(f"Processing clients batch {batch_index+1}/{len(batches)} ({len(batch)} items)")
+                    
+                    # Use Supabase client to upsert data
+                    result = self.supabase.table("clients").upsert(batch).execute()
+                    
+                    if result and result.data:
+                        batch_synced_count = len(result.data)
+                        synced_count += batch_synced_count
+                        logger.info(f"Successfully synced {batch_synced_count} clients to Supabase")
+                        
+                        # Update local database with sync status
+                        for i in range(batch_synced_count):
+                            try:
+                                batch_position = synced_count - batch_synced_count + i
+                                client_id = local_id_map.get(batch_position % len(batch))
+                                if client_id:
+                                    self.db_service.update_client_sync_status(client_id, True)
+                            except Exception as update_error:
+                                logger.error(f"Error updating client sync status: {str(update_error)}")
+                    else:
+                        failed_count += len(batch)
+                        logger.error(f"Sync error: No response data for batch {batch_index+1}")
+                except Exception as e:
+                    failed_count += len(batch)
+                    logger.error(f"Batch sync error for batch {batch_index+1}: {str(e)}")
+            
+            logger.info(f"Clients sync complete: {synced_count} synced, {failed_count} failed")
+            
+            return {
+                "synced": synced_count,
+                "failed": failed_count,
+                "status": "complete" if failed_count == 0 else "partial"
+            }
+                
+        except Exception as e:
+            logger.error(f"Clients sync error: {str(e)}")
+            import traceback
+            logger.error(f"Clients sync traceback: {traceback.format_exc()}")
+            self.sync_failed = True
+            self.sync_error = str(e)
+            return {"synced": 0, "failed": len(clients) if 'clients' in locals() else 0, "status": "error"}
+            
+        finally:
+            if not self.is_syncing:
+                self.is_syncing = False
+                
+    async def sync_projects(self) -> Dict[str, Any]:
+        """
+        Synchronize projects from local database to Supabase.
+        
+        Returns:
+            dict: Sync results with counts and status
+        """
+        if not self.supabase:
+            logger.error("Supabase client not initialized")
+            return {"synced": 0, "failed": 0, "status": "error"}
+            
+        if not self.auth_service.is_authenticated():
+            logger.warning("Cannot sync projects: Not authenticated")
+            return {"synced": 0, "failed": 0, "status": "not_authenticated"}
+            
+        try:
+            # Only set is_syncing flag when called directly (not from sync_all)
+            if not self.is_syncing:
+                self.is_syncing = True
+            self.sync_failed = False
+            self.sync_error = None
+            
+            # Get user and organization data
+            user_id = self.auth_service.user.get("id")
+            org_id = await self._get_user_org_id(user_id)
+            
+            if not org_id:
+                logger.warning("Cannot sync projects: No organization found")
+                self.is_syncing = False
+                return {"synced": 0, "failed": 0, "status": "no_organization"}
+            
+            # Get unsynchronized projects
+            projects = self.db_service.get_unsynchronized_projects()
+            
+            if not projects:
+                logger.info("No projects to sync")
+                return {"synced": 0, "failed": 0, "status": "no_data"}
+            
+            logger.info(f"Syncing {len(projects)} projects")
+            
+            # Prepare projects for Supabase with proper field validation
+            supabase_projects = []
+            local_id_map = {}  # For tracking which local ID maps to which batch record
+            
+            for project in projects:
+                try:
+                    # Build a valid Supabase record
+                    supabase_record = {
+                        "id": project["id"],  # Use the same UUID
+                        "name": project["name"],
+                        "user_id": project["user_id"],
+                        "org_id": org_id,  # Add organization ID for Supabase RLS
+                        "created_at": project.get("created_at") or datetime.now().isoformat(),
+                        "updated_at": project.get("updated_at") or datetime.now().isoformat(),
+                        "is_active": project.get("is_active", 1) == 1,  # Convert to boolean
+                        "is_billable": project.get("is_billable", 1) == 1,  # Convert to boolean
+                    }
+                    
+                    # Add optional fields only if they exist
+                    for field in ["client_id", "description", "color", "hourly_rate"]:
+                        if project.get(field) is not None:
+                            supabase_record[field] = project[field]
+                    
+                    # Store the record and mapping
+                    supabase_projects.append(supabase_record)
+                    local_id_map[len(supabase_projects) - 1] = project["id"]
+                    
+                except Exception as e:
+                    logger.error(f"Error preparing project {project.get('id')}: {str(e)}")
+                    continue
+            
+            # Split into batches to avoid request size limits
+            batch_size = 20
+            batches = [supabase_projects[i:i + batch_size] for i in range(0, len(supabase_projects), batch_size)]
+            
+            synced_count = 0
+            failed_count = 0
+            
+            for batch_index, batch in enumerate(batches):
+                try:
+                    logger.info(f"Processing projects batch {batch_index+1}/{len(batches)} ({len(batch)} items)")
+                    
+                    # Use Supabase client to upsert data
+                    result = self.supabase.table("projects").upsert(batch).execute()
+                    
+                    if result and result.data:
+                        batch_synced_count = len(result.data)
+                        synced_count += batch_synced_count
+                        logger.info(f"Successfully synced {batch_synced_count} projects to Supabase")
+                        
+                        # Update local database with sync status
+                        for i in range(batch_synced_count):
+                            try:
+                                batch_position = synced_count - batch_synced_count + i
+                                project_id = local_id_map.get(batch_position % len(batch))
+                                if project_id:
+                                    self.db_service.update_project_sync_status(project_id, True)
+                            except Exception as update_error:
+                                logger.error(f"Error updating project sync status: {str(update_error)}")
+                    else:
+                        failed_count += len(batch)
+                        logger.error(f"Sync error: No response data for batch {batch_index+1}")
+                except Exception as e:
+                    failed_count += len(batch)
+                    logger.error(f"Batch sync error for batch {batch_index+1}: {str(e)}")
+            
+            logger.info(f"Projects sync complete: {synced_count} synced, {failed_count} failed")
+            
+            return {
+                "synced": synced_count,
+                "failed": failed_count,
+                "status": "complete" if failed_count == 0 else "partial"
+            }
+                
+        except Exception as e:
+            logger.error(f"Projects sync error: {str(e)}")
+            import traceback
+            logger.error(f"Projects sync traceback: {traceback.format_exc()}")
+            self.sync_failed = True
+            self.sync_error = str(e)
+            return {"synced": 0, "failed": len(projects) if 'projects' in locals() else 0, "status": "error"}
+            
+        finally:
+            if not self.is_syncing:
+                self.is_syncing = False
+
+    async def sync_tasks(self) -> Dict[str, Any]:
+        """
+        Synchronize project tasks from local database to Supabase.
+        
+        Returns:
+            dict: Sync results with counts and status
+        """
+        if not self.supabase:
+            logger.error("Supabase client not initialized")
+            return {"synced": 0, "failed": 0, "status": "error"}
+            
+        if not self.auth_service.is_authenticated():
+            logger.warning("Cannot sync project tasks: Not authenticated")
+            return {"synced": 0, "failed": 0, "status": "not_authenticated"}
+            
+        try:
+            # Only set is_syncing flag when called directly (not from sync_all)
+            if not self.is_syncing:
+                self.is_syncing = True
+            self.sync_failed = False
+            self.sync_error = None
+            
+            # Get user and organization data
+            user_id = self.auth_service.user.get("id")
+            org_id = await self._get_user_org_id(user_id)
+            
+            if not org_id:
+                logger.warning("Cannot sync project tasks: No organization found")
+                self.is_syncing = False
+                return {"synced": 0, "failed": 0, "status": "no_organization"}
+            
+            # Get unsynchronized project tasks
+            tasks = self.db_service.get_unsynchronized_project_tasks()
+            
+            if not tasks:
+                logger.info("No project tasks to sync")
+                return {"synced": 0, "failed": 0, "status": "no_data"}
+            
+            logger.info(f"Syncing {len(tasks)} project tasks")
+            
+            # Prepare project tasks for Supabase with proper field validation
+            supabase_tasks = []
+            local_id_map = {}  # For tracking which local ID maps to which batch record
+            
+            for task in tasks:
+                try:
+                    # Build a valid Supabase record based on project_tasks schema
+                    # Note: org_id field removed as it doesn't exist in Supabase schema
+                    supabase_record = {
+                        "id": task["id"],  # Use the same UUID
+                        "name": task["name"],
+                        "description": task.get("description"),
+                        "project_id": task["project_id"],
+                        "created_at": task.get("created_at") or datetime.now().isoformat(),
+                        "updated_at": task.get("updated_at") or datetime.now().isoformat(),
+                        "is_active": task.get("is_active", 1) == 1,  # Convert to boolean
+                    }
+                    
+                    # Add optional fields only if they exist
+                    if task.get("estimated_hours") is not None:
+                        supabase_record["estimated_hours"] = task["estimated_hours"]
+                    
+                    # Store the record and mapping
+                    supabase_tasks.append(supabase_record)
+                    local_id_map[len(supabase_tasks) - 1] = task["id"]
+                    
+                except Exception as e:
+                    logger.error(f"Error preparing project task {task.get('id')}: {str(e)}")
+                    continue
+            
+            # Split into batches to avoid request size limits
+            batch_size = 20
+            batches = [supabase_tasks[i:i + batch_size] for i in range(0, len(supabase_tasks), batch_size)]
+            
+            synced_count = 0
+            failed_count = 0
+            
+            for batch_index, batch in enumerate(batches):
+                try:
+                    logger.info(f"Processing project tasks batch {batch_index+1}/{len(batches)} ({len(batch)} items)")
+                    
+                    # Use Supabase client to upsert data
+                    result = self.supabase.table("project_tasks").upsert(batch).execute()
+                    
+                    if result and result.data:
+                        batch_synced_count = len(result.data)
+                        synced_count += batch_synced_count
+                        logger.info(f"Successfully synced {batch_synced_count} project tasks to Supabase")
+                        
+                        # Update local database with sync status
+                        for i in range(batch_synced_count):
+                            try:
+                                batch_position = synced_count - batch_synced_count + i
+                                task_id = local_id_map.get(batch_position % len(batch))
+                                if task_id:
+                                    self.db_service.update_project_task_sync_status(task_id, True)
+                            except Exception as update_error:
+                                logger.error(f"Error updating project task sync status: {str(update_error)}")
+                    else:
+                        failed_count += len(batch)
+                        logger.error(f"Sync error: No response data for batch {batch_index+1}")
+                except Exception as e:
+                    failed_count += len(batch)
+                    logger.error(f"Batch sync error for batch {batch_index+1}: {str(e)}")
+            
+            logger.info(f"Project tasks sync complete: {synced_count} synced, {failed_count} failed")
+            
+            return {
+                "synced": synced_count,
+                "failed": failed_count,
+                "status": "complete" if failed_count == 0 else "partial"
+            }
+                
+        except Exception as e:
+            logger.error(f"Project tasks sync error: {str(e)}")
+            import traceback
+            logger.error(f"Project tasks sync traceback: {traceback.format_exc()}")
+            self.sync_failed = True
+            self.sync_error = str(e)
+            return {"synced": 0, "failed": len(tasks) if 'tasks' in locals() else 0, "status": "error"}
+            
+        finally:
+            if not self.is_syncing:
+                self.is_syncing = False
+    
+    async def sync_time_entries(self) -> Dict[str, Any]:
+        """
+        Synchronize time entries from local database to Supabase.
+        
+        Returns:
+            dict: Sync results with counts and status
+        """
+        if not self.supabase:
+            logger.error("Supabase client not initialized")
+            return {"synced": 0, "failed": 0, "status": "error"}
+            
+        if not self.auth_service.is_authenticated():
+            logger.warning("Cannot sync time entries: Not authenticated")
+            return {"synced": 0, "failed": 0, "status": "not_authenticated"}
+            
+        try:
+            # Only set is_syncing flag when called directly (not from sync_all)
+            if not self.is_syncing:
+                self.is_syncing = True
+            self.sync_failed = False
+            self.sync_error = None
+            
+            # Get user and organization data
+            user_id = self.auth_service.user.get("id")
+            org_id = await self._get_user_org_id(user_id)
+            
+            if not org_id:
+                logger.warning("Cannot sync time entries: No organization found")
+                self.is_syncing = False
+                return {"synced": 0, "failed": 0, "status": "no_organization"}
+            
+            # Get unsynchronized time entries
+            time_entries = self.db_service.get_unsynchronized_time_entries()
+            
+            if not time_entries:
+                logger.info("No time entries to sync")
+                return {"synced": 0, "failed": 0, "status": "no_data"}
+            
+            logger.info(f"Syncing {len(time_entries)} time entries")
+            
+            # Prepare time entries for Supabase with proper field validation
+            supabase_entries = []
+            local_id_map = {}  # For tracking which local ID maps to which batch record
+            
+            for entry in time_entries:
+                try:
+                    # Ensure entry has required fields
+                    if not entry.get("start_time"):
+                        logger.warning(f"Skipping time entry {entry.get('id')} - missing start_time")
+                        continue
+                    
+                    # Build a valid Supabase record
+                    supabase_record = {
+                        "id": entry["id"],  # Use the same UUID
+                        "user_id": entry["user_id"],
+                        "org_id": org_id,  # Add organization ID for Supabase RLS
+                        "start_time": entry["start_time"],
+                        "created_at": entry.get("created_at") or datetime.now().isoformat(),
+                        "updated_at": entry.get("updated_at") or datetime.now().isoformat(),
+                        "is_active": entry.get("is_active", 0) == 1,  # Convert to boolean
+                    }
+                    
+                    # Add optional fields only if they exist
+                    for field in ["project_id", "task_id", "description", "end_time"]:
+                        if entry.get(field) is not None:
+                            supabase_record[field] = entry[field]
+                    
+                    # Add duration if available and valid
+                    if entry.get("duration") is not None:
+                        # Ensure duration is a positive integer
+                        try:
+                            duration = int(entry["duration"])
+                            if duration < 0:
+                                duration = abs(duration)
+                            supabase_record["duration"] = duration
+                        except (ValueError, TypeError):
+                            # If duration can't be converted, calculate it from start/end time
+                            if entry.get("end_time") and entry.get("start_time"):
+                                try:
+                                    start = datetime.fromisoformat(entry["start_time"].replace("Z", "+00:00"))
+                                    end = datetime.fromisoformat(entry["end_time"].replace("Z", "+00:00"))
+                                    supabase_record["duration"] = int((end - start).total_seconds())
+                                except (ValueError, TypeError):
+                                    logger.warning(f"Could not calculate duration for time entry {entry.get('id')}")
+                    
+                    # Store the record and mapping
+                    supabase_entries.append(supabase_record)
+                    local_id_map[len(supabase_entries) - 1] = entry["id"]
+                    
+                except Exception as e:
+                    logger.error(f"Error preparing time entry {entry.get('id')}: {str(e)}")
+                    continue
+            
+            # Split into batches to avoid request size limits
+            batch_size = 20
+            batches = [supabase_entries[i:i + batch_size] for i in range(0, len(supabase_entries), batch_size)]
+            
+            synced_count = 0
+            failed_count = 0
+            
+            for batch_index, batch in enumerate(batches):
+                try:
+                    logger.info(f"Processing time entries batch {batch_index+1}/{len(batches)} ({len(batch)} items)")
+                    
+                    # Use Supabase client to upsert data
+                    result = self.supabase.table("time_entries").upsert(batch).execute()
+                    
+                    if result and result.data:
+                        batch_synced_count = len(result.data)
+                        synced_count += batch_synced_count
+                        logger.info(f"Successfully synced {batch_synced_count} time entries to Supabase")
+                        
+                        # Update local database with sync status
+                        for i in range(batch_synced_count):
+                            try:
+                                batch_position = synced_count - batch_synced_count + i
+                                entry_id = local_id_map.get(batch_position % len(batch))
+                                if entry_id:
+                                    self.db_service.update_time_entry_sync_status(entry_id, True)
+                            except Exception as update_error:
+                                logger.error(f"Error updating time entry sync status: {str(update_error)}")
+                    else:
+                        failed_count += len(batch)
+                        logger.error(f"Sync error: No response data for batch {batch_index+1}")
+                except Exception as e:
+                    failed_count += len(batch)
+                    logger.error(f"Batch sync error for batch {batch_index+1}: {str(e)}")
+            
+            logger.info(f"Time entries sync complete: {synced_count} synced, {failed_count} failed")
+            
+            return {
+                "synced": synced_count,
+                "failed": failed_count,
+                "status": "complete" if failed_count == 0 else "partial"
+            }
+                
+        except Exception as e:
+            logger.error(f"Time entries sync error: {str(e)}")
+            import traceback
+            logger.error(f"Time entries sync traceback: {traceback.format_exc()}")
+            self.sync_failed = True
+            self.sync_error = str(e)
+            return {"synced": 0, "failed": len(time_entries) if 'time_entries' in locals() else 0, "status": "error"}
+            
+        finally:
+            if not self.is_syncing:
+                self.is_syncing = False
+
     async def sync_all(self) -> Dict[str, Any]:
         """
         Synchronize all data between local and remote.
@@ -634,6 +1175,10 @@ class SupabaseSyncService:
             org_result = None
             activity_result = None
             screenshot_result = None
+            client_result = None
+            project_result = None
+            task_result = None
+            time_entry_result = None
             
             try:
                 # Sync organization data first (pull)
@@ -662,6 +1207,34 @@ class SupabaseSyncService:
                 screenshot_duration = (datetime.now() - screenshot_start).total_seconds()
                 logger.info(f"Screenshots sync completed in {screenshot_duration:.2f}s with status: {screenshot_result.get('status', 'unknown')}")
                 
+                # Sync clients (push)
+                logger.info("Starting clients sync")
+                client_start = datetime.now()
+                client_result = await self.sync_clients()
+                client_duration = (datetime.now() - client_start).total_seconds()
+                logger.info(f"Clients sync completed in {client_duration:.2f}s with status: {client_result.get('status', 'unknown')}")
+                
+                # Sync projects (push)
+                logger.info("Starting projects sync")
+                project_start = datetime.now()
+                project_result = await self.sync_projects()
+                project_duration = (datetime.now() - project_start).total_seconds()
+                logger.info(f"Projects sync completed in {project_duration:.2f}s with status: {project_result.get('status', 'unknown')}")
+                
+                # Sync tasks (push)
+                logger.info("Starting tasks sync")
+                task_start = datetime.now()
+                task_result = await self.sync_tasks()
+                task_duration = (datetime.now() - task_start).total_seconds()
+                logger.info(f"Tasks sync completed in {task_duration:.2f}s with status: {task_result.get('status', 'unknown')}")
+
+                # Sync time entries (push)
+                logger.info("Starting time entries sync")
+                time_entry_start = datetime.now()
+                time_entry_result = await self.sync_time_entries()
+                time_entry_duration = (datetime.now() - time_entry_start).total_seconds()
+                logger.info(f"Time entries sync completed in {time_entry_duration:.2f}s with status: {time_entry_result.get('status', 'unknown')}")
+                
                 # Calculate overall duration
                 total_duration = (datetime.now() - start_time).total_seconds()
                 
@@ -669,7 +1242,11 @@ class SupabaseSyncService:
                 statuses = [
                     org_result.get('status') if org_result else 'error',
                     activity_result.get('status') if activity_result else 'error',
-                    screenshot_result.get('status') if screenshot_result else 'error'
+                    screenshot_result.get('status') if screenshot_result else 'error',
+                    client_result.get('status') if client_result else 'error',
+                    project_result.get('status') if project_result else 'error',
+                    task_result.get('status') if task_result else 'error',
+                    time_entry_result.get('status') if time_entry_result else 'error'
                 ]
                 
                 overall_status = "complete"
@@ -684,6 +1261,10 @@ class SupabaseSyncService:
                     "organization": org_result,
                     "activity_logs": activity_result,
                     "screenshots": screenshot_result,
+                    "clients": client_result,
+                    "projects": project_result,
+                    "tasks": task_result,
+                    "time_entries": time_entry_result,
                     "duration_seconds": total_duration,
                     "status": overall_status
                 }
@@ -834,3 +1415,26 @@ class SupabaseSyncService:
                 
         except Exception as e:
             logger.error(f"Error saving sync state: {str(e)}")
+            
+    def _is_valid_uuid(self, uuid_string: str) -> bool:
+        """
+        Check if a string is a valid UUID.
+        
+        Args:
+            uuid_string: The string to check
+            
+        Returns:
+            bool: True if the string is a valid UUID
+        """
+        if not uuid_string:
+            return False
+            
+        try:
+            # Convert to standard UUID format
+            uuid_obj = uuid.UUID(uuid_string)
+            # Check that it's not a UUID like "00000000-0000-0000-0000-000000000000"
+            if uuid_obj.int == 0:
+                return False
+            return True
+        except (ValueError, AttributeError, TypeError):
+            return False

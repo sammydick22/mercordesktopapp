@@ -8,13 +8,13 @@ import logging
 import uuid
 
 from api.dependencies import get_current_user
-from services.database import DatabaseService
+from api.dependencies import get_db_service
 
 # Setup logger
 logger = logging.getLogger(__name__)
 
-# Create database service
-db_service = DatabaseService()
+# Get database service singleton
+db_service = get_db_service()
 
 # Create router
 router = APIRouter(
@@ -103,18 +103,34 @@ async def create_client(
     if not name:
         raise HTTPException(status_code=400, detail="Client name is required")
     
-    # Create a copy of client data without the 'name' key to avoid duplicate argument
-    client_data = {k: v for k, v in client.items() if k != 'name'}
+    # Only pass specific known fields to create_client to avoid unexpected keyword arguments
+    client_data = {
+        "email": client.get("email"),
+        "phone": client.get("phone"),
+        "address": client.get("address"),
+        "notes": client.get("notes"),
+        "is_active": client.get("is_active", True),
+        "contact_name": client.get("contact_name")
+    }
     
-    # Call create_client with name as first argument, user_id as second, and remaining data as kwargs
-    new_client = db_service.create_client(name, user_id, **client_data)
+    # Filter out None values
+    client_data = {k: v for k, v in client_data.items() if v is not None}
     
-    if not new_client:
-        raise HTTPException(status_code=500, detail="Failed to create client")
-    
-    logger.info(f"Created client {new_client['id']}")
-    
-    return {"client": new_client}
+    # Call create_client with name as first argument, user_id as second, and specific data as kwargs
+    try:
+        new_client = db_service.create_client(name, user_id, **client_data)
+        
+        if not new_client:
+            raise HTTPException(status_code=500, detail="Failed to create client")
+        
+        logger.info(f"Created client {new_client['id']}")
+        
+        return {"client": new_client}
+    except TypeError as e:
+        # Log the specific error for debugging
+        logger.error(f"TypeError in create_client: {str(e)}")
+        logger.error(f"Attempted to pass these kwargs: {client_data}")
+        raise HTTPException(status_code=500, detail=f"Failed to create client: {str(e)}")
 
 @router.put("/{client_id}")
 async def update_client(
