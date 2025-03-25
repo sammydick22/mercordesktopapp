@@ -81,6 +81,11 @@ class ImprovedSupabaseSyncService(SupabaseSyncService):
             self.db_service.remove_specific_membership(problematic_org_id)
                 
             # Get user data
+            # Check if user object exists before trying to get ID
+            if not self.auth_service.user:
+                logger.error("Cannot sync organization data: User object is None")
+                return {"status": "error", "message": "User object not available"}
+                
             user_id = self.auth_service.user.get("id")
             if not user_id:
                 logger.error("Cannot sync organization data: User ID not available")
