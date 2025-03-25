@@ -12,6 +12,7 @@ from datetime import datetime
 # Local imports
 from .database import DatabaseService
 from .supabase_auth import SupabaseAuthService
+from .load_sync_screenshot_extension import load_screenshot_extension
 
 # Setup logger
 logger = logging.getLogger(__name__)
@@ -176,6 +177,7 @@ class SupabaseSyncService:
                     # Don't include the local numeric ID in the Supabase record
                     # Build a valid Supabase record with fallbacks for missing fields
                     supabase_record = {
+                        "id": log["id"], 
                         "user_id": user_id,
                         "org_id": org_id,
                         "window_title": log.get("window_title", "Unknown"),
@@ -301,7 +303,7 @@ class SupabaseSyncService:
             
     async def sync_screenshots(self) -> Dict[str, Any]:
         """
-        Synchronize screenshots from local storage to Supabase Storage.
+        Synchronize screenshots from local database to Supabase.
         
         Returns:
             dict: Sync results with counts and status
@@ -323,22 +325,11 @@ class SupabaseSyncService:
             
             # Get user and organization data
             user_id = self.auth_service.user.get("id")
-            org_id = await self._get_user_org_id(user_id)
-            
-            if not org_id:
-                logger.warning("Cannot sync screenshots: No organization found")
-                self.is_syncing = False
-                return {"synced": 0, "failed": 0, "status": "no_organization"}
-            
-            # Get last screenshot sync ID
-            last_sync_id = self.last_sync.get("screenshots", {}).get("last_id", 0)
             
             # Get unsynchronized screenshots
-            screenshots = self.db_service.get_unsynchronized_screenshots(last_sync_id)
-            
-            # Add detailed logging to help diagnose the issue
-            logger.info(f"Looking for unsynchronized screenshots after ID {last_sync_id}")
-            logger.info(f"Found {len(screenshots) if screenshots else 0} unsynchronized screenshots")
+            # Pass None to get all unsynchronized screenshots (synced=0)
+            # No last_id filter is needed since we're using the modified query
+            screenshots = self.db_service.get_unsynchronized_screenshots(None)
             
             if not screenshots:
                 logger.info("No screenshots to sync")
@@ -347,79 +338,102 @@ class SupabaseSyncService:
             
             logger.info(f"Syncing {len(screenshots)} screenshots")
             
-            # Initialize storage client
-            storage_client = self.supabase.storage.from_(self.screenshots_bucket)
+            # Helper function to validate timestamps
+            def validate_timestamp(timestamp_value: Any) -> str:
+                """
+                Validate and sanitize a timestamp value.
+                If the timestamp is invalid (None, 0, empty string), returns current time in ISO format.
+                
+                Args:
+                    timestamp_value: The timestamp value to validate
+                    
+                Returns:
+                    str: A valid ISO timestamp string
+                """
+                now = datetime.now().isoformat()
+                
+                # If timestamp is None, empty string, or 0, return current time
+                if timestamp_value is None or timestamp_value == "" or timestamp_value == "0" or timestamp_value == 0:
+                    return now
+                    
+                # If it's already a string, check if it's a valid ISO format
+                if isinstance(timestamp_value, str):
+                    try:
+                        # Try to parse it as datetime to validate
+                        datetime.fromisoformat(timestamp_value.replace('Z', '+00:00'))
+                        return timestamp_value
+                    except ValueError:
+                        # If parsing fails, it's not a valid timestamp
+                        return now
+                
+                # For all other cases, return current timestamp
+                return now
+            
+            # Prepare screenshots for Supabase
+            supabase_screenshots = []
+            for screenshot in screenshots:
+                # Get current time once for consistency
+                now = datetime.now().isoformat()
+                
+                # Create a clean record that maps local field names to Supabase field names
+                # With timestamp validation
+                clean_record = {
+                    "id": screenshot["id"],
+                    "user_id": user_id,
+                    "org_id": self.get_current_org_id(),
+                    "image_url": screenshot.get("filepath", ""),  # Map filepath to image_url
+                    "taken_at": validate_timestamp(screenshot.get("timestamp") or screenshot.get("created_at")),
+                    "created_at": now
+                }
+                
+                # Add optional fields only if they exist
+                if screenshot.get("thumbnail_path"):
+                    clean_record["thumbnail_url"] = screenshot.get("thumbnail_path")  # Map thumbnail_path to thumbnail_url
+                if screenshot.get("activity_log_id"):
+                    clean_record["activity_log_id"] = screenshot.get("activity_log_id")
+                if screenshot.get("created_at"):
+                    clean_record["client_created_at"] = validate_timestamp(screenshot.get("created_at"))
+                
+                supabase_screenshots.append(clean_record)
+            
+            # Split into batches to avoid request size limits
+            batch_size = 20
+            batches = [supabase_screenshots[i:i + batch_size] for i in range(0, len(supabase_screenshots), batch_size)]
             
             synced_count = 0
             failed_count = 0
             
-            for screenshot in screenshots:
+            for batch_index, batch in enumerate(batches):
                 try:
-                    # Upload screenshot to Supabase Storage
-                    file_path = screenshot["filepath"]
-                    if not os.path.exists(file_path):
-                        logger.warning(f"Screenshot file not found: {file_path}")
-                        failed_count += 1
-                        continue
+                    logger.info(f"Processing screenshots batch {batch_index+1}/{len(batches)} ({len(batch)} items)")
                     
-                    # Generate path in storage
-                    screenshot_filename = os.path.basename(file_path)
-                    storage_path = f"{user_id}/{screenshot_filename}"
-                    
-                    # Upload screenshot using Supabase client
-                    with open(file_path, "rb") as f:
-                        storage_client.upload(storage_path, f)
-                        
-                    # Upload thumbnail if available
-                    thumbnail_url = None
-                    if screenshot.get("thumbnail_path") and os.path.exists(screenshot["thumbnail_path"]):
-                        thumbnail_filename = os.path.basename(screenshot["thumbnail_path"])
-                        thumbnail_path = f"{user_id}/thumbnails/{thumbnail_filename}"
-                        
-                        with open(screenshot["thumbnail_path"], "rb") as f:
-                            storage_client.upload(thumbnail_path, f)
-                            
-                        # Get public URL for thumbnail
-                        thumbnail_url = storage_client.get_public_url(thumbnail_path)
-                    
-                    # Create screenshot record in Supabase
-                    # Note: In Supabase, screenshots.id is actually UUID, not BIGSERIAL as in schema file
-                    screenshot_record = {
-                        "id": screenshot["id"],  # Include the UUID directly
-                        "user_id": user_id,
-                        "org_id": org_id,
-                        "image_url": storage_client.get_public_url(storage_path),
-                        "thumbnail_url": thumbnail_url,
-                        "taken_at": screenshot.get("timestamp") or datetime.now().isoformat(),
-                        "client_created_at": screenshot.get("created_at") or datetime.now().isoformat()
-                    }
-                    
-                    # Add activity_log_id only if it's valid UUID
-                    if screenshot.get("activity_log_id") and self._is_valid_uuid(screenshot["activity_log_id"]):
-                        screenshot_record["activity_log_id"] = screenshot["activity_log_id"]
-                    
-                    # Insert screenshot record using Supabase client
-                    result = self.supabase.table("screenshots").insert(screenshot_record).execute()
+                    # Use Supabase client to insert data
+                    result = self.supabase.table("screenshots").upsert(batch).execute()
                     
                     if result and result.data:
+                        batch_synced_count = len(result.data)
+                        synced_count += batch_synced_count
+                        logger.info(f"Successfully synced {batch_synced_count} screenshots to Supabase")
+                        
                         # Update local database with sync status
-                        self.db_service.update_screenshot_sync_status(screenshot["id"], True)
-                        synced_count += 1
+                        for item in result.data:
+                            try:
+                                # Get the ID from the result
+                                screenshot_id = item.get("id")
+                                if screenshot_id:
+                                    logger.debug(f"Updating sync status for screenshot: {screenshot_id}")
+                                    self.db_service.update_screenshot_sync_status(screenshot_id, True)
+                                else:
+                                    logger.warning(f"Could not find ID in screenshot response: {item}")
+                            except Exception as update_error:
+                                logger.error(f"Error updating screenshot sync status: {str(update_error)}")
                     else:
-                        logger.error("Screenshot record insert failed: No response data")
-                        failed_count += 1
-                
+                        failed_count += len(batch)
+                        logger.error(f"Sync error: No response data for batch {batch_index+1}")
+                        
                 except Exception as e:
-                    failed_count += 1
-                    logger.error(f"Screenshot sync error: {str(e)}")
-            
-            # Update last sync status
-            if synced_count > 0:
-                self.last_sync["screenshots"] = {
-                    "last_id": screenshots[-1]["id"],
-                    "last_time": datetime.now().isoformat()
-                }
-                self._save_sync_state()
+                    failed_count += len(batch)
+                    logger.error(f"Batch sync error for batch {batch_index+1}: {str(e)}")
             
             logger.info(f"Screenshots sync complete: {synced_count} synced, {failed_count} failed")
             
@@ -431,6 +445,8 @@ class SupabaseSyncService:
                 
         except Exception as e:
             logger.error(f"Screenshots sync error: {str(e)}")
+            import traceback
+            logger.error(f"Screenshots sync traceback: {traceback.format_exc()}")
             self.sync_failed = True
             self.sync_error = str(e)
             return {"synced": 0, "failed": len(screenshots) if 'screenshots' in locals() else 0, "status": "error"}
@@ -1377,6 +1393,29 @@ class SupabaseSyncService:
                     
         except Exception as e:
             logger.error(f"Error getting organization ID: {str(e)}")
+            return None
+            
+    # Helper method to get the current organization ID
+    def get_current_org_id(self) -> Optional[str]:
+        """
+        Get the current user's organization ID.
+        
+        Returns:
+            str: Organization ID or None if not found
+        """
+        try:
+            user_id = self.auth_service.user.get("id")
+            if not user_id:
+                return None
+                
+            # Check local database first for organization membership
+            org_membership = self.db_service.get_user_org_membership(user_id)
+            if org_membership and org_membership.get("org_id"):
+                return org_membership["org_id"]
+                
+            return None
+        except Exception as e:
+            logger.error(f"Error getting current organization ID: {str(e)}")
             return None
             
     # The _bucket_exists and _create_bucket methods have been replaced by direct Supabase client calls

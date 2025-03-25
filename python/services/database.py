@@ -1215,12 +1215,12 @@ class DatabaseService:
             logger.error(f"Error getting unsynchronized activity logs: {str(e)}")
             return []
             
-    def get_unsynchronized_screenshots(self, last_id: int = 0) -> List[Dict[str, Any]]:
+    def get_unsynchronized_screenshots(self, last_id: str = None) -> List[Dict[str, Any]]:
         """
         Get unsynchronized screenshots.
         
         Args:
-            last_id: ID threshold to filter by
+            last_id: UUID of last synced screenshot or None to get all unsynchronized
             
         Returns:
             list: List of unsynchronized screenshots
@@ -1228,19 +1228,18 @@ class DatabaseService:
         try:
             cursor = self._get_connection().cursor()
             
-            # Build query
+            # Build query that selects all fields including time_entry_id
+            logger.info(f"Looking for unsynchronized screenshots (synced=0)")
             query = '''
             SELECT 
-                id, filepath, thumbnail_path, activity_log_id, 
+                id, filepath, thumbnail_path, activity_log_id, time_entry_id,
                 timestamp, synced, created_at
             FROM screenshots 
-            WHERE synced = 0 AND id > ?
-            ORDER BY id ASC
+            WHERE synced = 0
+            ORDER BY created_at ASC
             LIMIT 500
             '''
-            
-            # Execute query
-            cursor.execute(query, (last_id,))
+            cursor.execute(query)
             
             # Get results
             results = cursor.fetchall()
