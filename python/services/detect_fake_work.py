@@ -217,7 +217,7 @@ class FakeWorkDetector:
             client = Cerebras(api_key=os.environ.get("CEREBRAS_API_KEY"))
             response = client.chat.completions.create(
                 messages=[{"role": "system", "content": prompt}],
-                model="llama3.1-8b",
+                model="llama-3.3-70b",
                 stream=False,
                 max_completion_tokens=1024,
                 temperature=0,
@@ -280,7 +280,7 @@ class FakeWorkDetector:
                 client = Cerebras(api_key=os.environ.get("CEREBRAS_API_KEY"))
                 response = client.chat.completions.create(
                     messages=[{"role": "system", "content": prompt}],
-                    model="llama3.1-8b",
+                    model="llama-3.3-70b",
                     stream=False,
                     max_completion_tokens=1024,
                     temperature=0,

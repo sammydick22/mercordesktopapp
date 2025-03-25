@@ -19,13 +19,28 @@ apiClient.interceptors.request.use((config) => {
   return config
 })
 
+// Track last refresh attempt time to prevent refresh spam
+let lastRefreshAttempt = 0
+const REFRESH_COOLDOWN_MS = 10000 // 10 seconds between refresh attempts
+
 // Handle token refresh on 401 errors
 apiClient.interceptors.response.use(
   (response) => response,
   async (error) => {
     const originalRequest = error.config
+    const currentTime = Date.now()
+    
     if (error.response?.status === 401 && !originalRequest._retry) {
+      // Check if we're still in the cooldown period
+      if (currentTime - lastRefreshAttempt < REFRESH_COOLDOWN_MS) {
+        // Still in cooldown, don't attempt refresh
+        console.log("Token refresh in cooldown period, skipping refresh attempt")
+        return Promise.reject(error)
+      }
+      
       originalRequest._retry = true
+      lastRefreshAttempt = currentTime
+      
       try {
         // Call refresh token endpoint
         const { data } = await apiClient.post("/auth/refresh")
