@@ -1,9 +1,19 @@
-import { app, BrowserWindow, Menu, Tray, dialog, ipcMain } from 'electron';
+import { app, BrowserWindow, Menu, Tray, dialog, ipcMain, protocol } from 'electron';
 import * as path from 'path';
 import * as url from 'url';
 import { autoUpdater } from 'electron-updater';
 import { PythonBackendService } from './services/python';
 import { setupIPC } from './ipc';
+
+// Register protocol before app is ready
+protocol.registerSchemesAsPrivileged([
+  { scheme: 'app', privileges: { secure: true, standard: true } }
+]);
+
+// Handle creating/removing shortcuts on Windows when installing/uninstalling
+if (require('electron-squirrel-startup')) {
+  app.quit();
+}
 
 class MainProcess {
   private mainWindow: BrowserWindow | null = null;
@@ -12,10 +22,6 @@ class MainProcess {
   private isQuitting = false;
 
   constructor() {
-    // Handle creating/removing shortcuts on Windows when installing/uninstalling
-    if (require('electron-squirrel-startup')) {
-      app.quit();
-    }
 
     this.registerAppEvents();
 
@@ -105,20 +111,56 @@ class MainProcess {
     if (process.env.NODE_ENV === 'development') {
       // Load from Next.js development server
       await this.mainWindow.loadURL('http://localhost:3000');
-      
-      // Open DevTools in development mode
-      this.mainWindow.webContents.openDevTools();
     } else {
-      // Load from built Next.js app
-      const appPath = path.join(process.resourcesPath, 'app');
-      const indexPath = path.join(appPath, 'index.html');
-      
-      await this.mainWindow.loadURL(url.format({
-        pathname: indexPath,
-        protocol: 'file:',
-        slashes: true
-      }));
+      try {
+        // Load from built Next.js app
+        const appPath = path.join(process.resourcesPath, 'app');
+        console.log('Loading app from:', appPath);
+        
+        const indexPath = path.join(appPath, 'index.html');
+        console.log('Index path:', indexPath);
+        
+        // Add a protocol handler for 'app://' to handle all navigation
+        this.setupProtocolHandler(appPath);
+        
+        // Use app:// protocol for loading instead of file://
+        await this.mainWindow.loadURL('app://main/index.html');
+      } catch (error) {
+        console.error('Failed to load app:', error);
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        dialog.showErrorBox(
+          'App Loading Error',
+          `Failed to load the application: ${errorMessage}`
+        );
+      }
     }
+    
+    // Open DevTools in both development and production for debugging
+    this.mainWindow.webContents.openDevTools();
+  }
+
+  private setupProtocolHandler(appPath: string) {
+    // Register app:// protocol handler to properly handle all routes
+    protocol.registerFileProtocol('app', (request: Electron.ProtocolRequest, callback: (response: Electron.ProtocolResponse) => void) => {
+      const url = request.url.substring(6); // Remove 'app://'
+      let normalizedPath = url;
+      
+      // Handle root path
+      if (normalizedPath === 'main/') {
+        normalizedPath = 'index.html';
+      }
+      
+      // Handle route-based paths by redirecting to index.html
+      if (!normalizedPath.includes('.')) {
+        normalizedPath = 'index.html';
+      }
+      
+      // Resolve the path to the app directory
+      const filePath = path.join(appPath, normalizedPath);
+      console.log('Protocol request:', request.url, '→', filePath);
+      
+      callback({ path: filePath });
+    });
   }
 
   private setupTray() {
