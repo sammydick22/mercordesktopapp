@@ -131,7 +131,8 @@ class DatabaseService:
                 is_active BOOLEAN NOT NULL DEFAULT 1,
                 synced BOOLEAN NOT NULL DEFAULT 0,
                 created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                dubious_times TEXT
             )
             ''')
             
@@ -464,7 +465,7 @@ class DatabaseService:
                 SELECT 
                     id, window_title, process_name, executable_path, 
                     start_time, end_time, duration, is_active, synced,
-                    created_at, updated_at
+                    created_at, updated_at, dubious_times
                 FROM activity_logs 
                 WHERE id = ?
                 ''',
@@ -481,7 +482,7 @@ class DatabaseService:
             column_names = [
                 'id', 'window_title', 'process_name', 'executable_path',
                 'start_time', 'end_time', 'duration', 'is_active', 'synced',
-                'created_at', 'updated_at'
+                'created_at', 'updated_at', 'dubious_times'
             ]
             
             return dict(zip(column_names, activity))
@@ -1172,6 +1173,59 @@ class DatabaseService:
             conn.rollback()
             return []
             
+    def update_activity_log_dubious_times(self, activity_id: str, timestamp: str) -> bool:
+        """
+        Add a timestamp to the dubious_times array for an activity log.
+        
+        Args:
+            activity_id: ID of the activity log
+            timestamp: ISO 8601 formatted timestamp to add
+            
+        Returns:
+            bool: True if successful
+        """
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            
+            # Get existing dubious_times
+            cursor.execute(
+                'SELECT dubious_times FROM activity_logs WHERE id = ?',
+                (activity_id,)
+            )
+            result = cursor.fetchone()
+            
+            if not result:
+                logger.warning(f"Activity log not found: {activity_id}")
+                return False
+            
+            # Parse existing times or create new array
+            dubious_times = []
+            if result[0]:
+                try:
+                    dubious_times = json.loads(result[0])
+                except json.JSONDecodeError:
+                    logger.warning(f"Invalid dubious_times JSON for activity_id={activity_id}, resetting")
+            
+            # Add new timestamp if it's not already in the array
+            if timestamp not in dubious_times:
+                dubious_times.append(timestamp)
+            
+            # Update activity log
+            cursor.execute(
+                'UPDATE activity_logs SET dubious_times = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+                (json.dumps(dubious_times), activity_id)
+            )
+            
+            conn.commit()
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error updating activity log dubious times: {str(e)}")
+            if 'conn' in locals():
+                conn.rollback()
+            return False
+    
     def get_unsynchronized_activity_logs(self, last_id: int = 0) -> List[Dict[str, Any]]:
         """
         Get unsynchronized activity logs.
@@ -1190,7 +1244,7 @@ class DatabaseService:
             SELECT 
                 id, window_title, process_name, executable_path, 
                 start_time, end_time, duration, is_active, synced,
-                created_at, updated_at
+                created_at, updated_at, dubious_times
             FROM activity_logs 
             WHERE synced = 0 AND id > ?
             ORDER BY id ASC
@@ -1207,7 +1261,7 @@ class DatabaseService:
             column_names = [
                 'id', 'window_title', 'process_name', 'executable_path',
                 'start_time', 'end_time', 'duration', 'is_active', 'synced',
-                'created_at', 'updated_at'
+                'created_at', 'updated_at', 'dubious_times'
             ]
             
             return [dict(zip(column_names, row)) for row in results]

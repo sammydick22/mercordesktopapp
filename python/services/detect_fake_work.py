@@ -4,6 +4,7 @@ import threading
 import math
 from math import log2
 import sys
+from datetime import datetime
 from pynput import mouse, keyboard
 import tiktoken
 import os
@@ -77,6 +78,7 @@ class FakeWorkDetector:
         self.keystroke_times = []        # Timestamps for keystroke dynamics
         self.fake_work_detected = False
         self.listening_enabled = False
+        self.detection_timestamps = []    # Timestamps when fake work was detected
 
         # Active window logging state
         self.active_window_log = {}      # Maps window title to total seconds spent
@@ -337,15 +339,36 @@ class FakeWorkDetector:
     def detect_fake_work(self):
         """
         Generator that runs in the background and yields True when fake work is detected.
+        
+        Whenever fake work is detected, the current timestamp is recorded in ISO 8601 format
+        and can be retrieved with get_detection_timestamps().
         """
         self.enable_listening()
         try:
             while self.listening_enabled and not self.fake_work_detected:
                 time.sleep(0.5)
             if self.fake_work_detected:
+                # Record the timestamp when fake work is detected
+                detection_time = datetime.now().isoformat()
+                self.detection_timestamps.append(detection_time)
                 yield True
         finally:
             self.disable_listening()
+    
+    def get_detection_timestamps(self):
+        """
+        Returns the list of timestamps when fake work was detected.
+        
+        Returns:
+            list: List of ISO 8601 formatted timestamp strings
+        """
+        return self.detection_timestamps
+    
+    def clear_detection_timestamps(self):
+        """
+        Clears the list of detection timestamps.
+        """
+        self.detection_timestamps = []
 
     def get_active_window_log(self):
         """

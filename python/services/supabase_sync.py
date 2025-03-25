@@ -204,6 +204,21 @@ class SupabaseSyncService:
                     if log.get("end_time"):
                         supabase_record["end_time"] = log["end_time"]
                     
+                    # Handle dubious_times (timestamps when fake work was detected)
+                    # Convert from JSON string array to PostgreSQL array of timestamptz
+                    if log.get("dubious_times"):
+                        try:
+                            # Parse the JSON string to get the array of timestamps
+                            dubious_times_json = log["dubious_times"]
+                            if isinstance(dubious_times_json, str):
+                                dubious_times_array = json.loads(dubious_times_json)
+                                # The timestamps should already be in ISO 8601 format,
+                                # which is compatible with PostgreSQL timestamptz
+                                supabase_record["dubious_times"] = dubious_times_array
+                                logger.debug(f"Added dubious_times to record: {dubious_times_array}")
+                        except (json.JSONDecodeError, TypeError) as json_error:
+                            logger.warning(f"Could not parse dubious_times JSON for activity_id={local_id}: {str(json_error)}")
+                    
                     # Convert duration to integer (required by Supabase schema)
                     if log.get("duration") is not None:
                         # First try to convert to float, then to int
