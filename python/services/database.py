@@ -384,14 +384,36 @@ class DatabaseService:
             end_time = datetime.now().isoformat()
             
             # Parse start time from string if needed
-            if isinstance(start_time, str):
-                start_datetime = datetime.fromisoformat(start_time)
-            else:
-                start_datetime = start_time
+            try:
+                if isinstance(start_time, str):
+                    # Handle timezone issues by standardizing the format
+                    if 'Z' in start_time:
+                        start_time = start_time.replace('Z', '+00:00')
+                    start_datetime = datetime.fromisoformat(start_time)
+                else:
+                    start_datetime = start_time
+                    
+                # Calculate duration in seconds
+                end_datetime = datetime.fromisoformat(end_time)
+                duration_seconds = (end_datetime - start_datetime).total_seconds()
                 
-            # Calculate duration in seconds
-            end_datetime = datetime.fromisoformat(end_time)
-            duration = (end_datetime - start_datetime).total_seconds()
+                # Ensure duration is positive and reasonable
+                if duration_seconds < 0:
+                    logger.warning(f"Negative duration calculated for activity_id={activity_id}, using absolute value: {duration_seconds}")
+                    duration_seconds = abs(duration_seconds)
+                
+                # Cap unreasonably large durations (>24 hours)
+                if duration_seconds > 86400:
+                    logger.warning(f"Excessive duration calculated for activity_id={activity_id}, capping at 3600: {duration_seconds}")
+                    duration_seconds = 3600  # Cap at 1 hour
+                
+                # Convert to integer for storage
+                duration = int(duration_seconds)
+                
+            except (ValueError, TypeError) as e:
+                # Handle timestamp parsing errors
+                logger.error(f"Error calculating duration for activity_id={activity_id}: {str(e)}")
+                duration = 300  # Default to 5 minutes on error
             
             # Update activity log
             cursor.execute(

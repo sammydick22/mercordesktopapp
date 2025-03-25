@@ -1,813 +1,131 @@
 """
-Extension methods for the DatabaseService class to handle clients, projects, and settings.
+Extensions for the DatabaseService to support project, client, and task synchronization.
 """
-import os
-import sqlite3
 import logging
-import uuid
-from typing import Dict, Any, List, Optional, Tuple
-from datetime import datetime
+from typing import Dict, Any, List, Optional
 
 # Setup logger
 logger = logging.getLogger(__name__)
 
-# Client methods
-def create_client(self, name: str, user_id: str, **kwargs) -> Dict[str, Any]:
+def get_unsynchronized_projects(self, last_id: str = '') -> List[Dict[str, Any]]:
     """
-    Create a new client.
+    Get unsynchronized projects.
     
     Args:
-        name: Name of the client
-        user_id: ID of the user who created the client
-        **kwargs: Additional client data
+        last_id: ID threshold to filter by
         
     Returns:
-        dict: The created client
+        list: List of unsynchronized projects
     """
     try:
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        
-        # Generate a UUID for the client
-        client_id = str(uuid.uuid4())
-        
-        # Get current timestamp for created_at and updated_at
-        current_time = datetime.now().isoformat()
-        
-        # Prepare query and parameters
-        fields = ['id', 'name', 'user_id', 'created_at', 'updated_at']
-        values = [client_id, name, user_id, current_time, current_time]
-        
-        # Add optional fields
-        optional_fields = [
-            'contact_name', 'email', 'phone', 'address', 'notes'
-        ]
-        
-        for field in optional_fields:
-            if field in kwargs and kwargs[field] is not None:
-                fields.append(field)
-                values.append(kwargs[field])
-        
-        # Set is_active to true by default
-        if 'is_active' not in fields:
-            fields.append('is_active')
-            values.append(1)  # 1 = True in SQLite
-            
-        # Create placeholders for SQL query
-        placeholders = ', '.join('?' for _ in range(len(fields)))
-        fields_str = ', '.join(fields)
-        
-        # Create new client
-        cursor.execute(
-            f'''
-            INSERT INTO clients 
-            ({fields_str}) 
-            VALUES ({placeholders})
-            ''',
-            values
-        )
-        
-        # Commit changes
-        conn.commit()
-        
-        # Return the created client
-        return self.get_client(client_id)
-    except Exception as e:
-        logger.error(f"Error creating client: {str(e)}")
-        conn.rollback()
-        raise
-
-def get_client(self, client_id: str) -> Dict[str, Any]:
-    """
-    Get a client by ID.
-    
-    Args:
-        client_id: ID of the client to get
-        
-    Returns:
-        dict: The client
-    """
-    try:
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        
-        # Get the client
-        cursor.execute(
-            '''
-            SELECT 
-                id, name, contact_name, email, phone, address, notes,
-                is_active, user_id, created_at, updated_at, synced
-            FROM clients 
-            WHERE id = ?
-            ''',
-            (client_id,)
-        )
-        
-        client = cursor.fetchone()
-        
-        if not client:
-            logger.warning(f"Client not found: {client_id}")
-            return {}
-            
-        # Convert to dictionary
-        column_names = [
-            'id', 'name', 'contact_name', 'email', 'phone', 'address', 'notes',
-            'is_active', 'user_id', 'created_at', 'updated_at', 'synced'
-        ]
-        
-        return dict(zip(column_names, client))
-    except Exception as e:
-        logger.error(f"Error getting client: {str(e)}")
-        return {}
-
-def update_client(self, client_id: str, **kwargs) -> Dict[str, Any]:
-    """
-    Update a client.
-    
-    Args:
-        client_id: ID of the client to update
-        **kwargs: Fields to update
-        
-    Returns:
-        dict: The updated client
-    """
-    try:
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        
-        # Build SET clause for SQL query
-        set_clause = []
-        params = []
-        
-        updateable_fields = [
-            'name', 'contact_name', 'email', 'phone', 
-            'address', 'notes', 'is_active'
-        ]
-        
-        for field in updateable_fields:
-            if field in kwargs and kwargs[field] is not None:
-                set_clause.append(f"{field} = ?")
-                params.append(kwargs[field])
-        
-        # Add updated_at timestamp
-        set_clause.append("updated_at = CURRENT_TIMESTAMP")
-        
-        # Add client_id to params
-        params.append(client_id)
-        
-        if not set_clause:
-            logger.warning(f"No fields to update for client: {client_id}")
-            return self.get_client(client_id)
-        
-        # Update client
-        cursor.execute(
-            f'''
-            UPDATE clients 
-            SET {', '.join(set_clause)}
-            WHERE id = ?
-            ''',
-            params
-        )
-        
-        # Commit changes
-        conn.commit()
-        
-        # Return the updated client
-        return self.get_client(client_id)
-    except Exception as e:
-        logger.error(f"Error updating client: {str(e)}")
-        conn.rollback()
-        return {}
-
-def delete_client(self, client_id: str) -> bool:
-    """
-    Delete a client.
-    
-    Args:
-        client_id: ID of the client to delete
-        
-    Returns:
-        bool: True if client was deleted
-    """
-    try:
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        
-        # Delete client
-        cursor.execute(
-            'DELETE FROM clients WHERE id = ?',
-            (client_id,)
-        )
-        
-        # Commit changes
-        conn.commit()
-        
-        return cursor.rowcount > 0
-    except Exception as e:
-        logger.error(f"Error deleting client: {str(e)}")
-        conn.rollback()
-        return False
-
-def get_clients(
-    self,
-    limit: int = 50,
-    offset: int = 0,
-    user_id: Optional[str] = None,
-    is_active: Optional[bool] = None,
-    synced: Optional[bool] = None
-) -> List[Dict[str, Any]]:
-    """
-    Get clients with optional filtering.
-    
-    Args:
-        limit: Maximum number of clients to return
-        offset: Offset for pagination
-        user_id: Filter by user ID
-        is_active: Filter by active status
-        synced: Filter by synced status
-        
-    Returns:
-        list: List of clients
-    """
-    try:
-        conn = self._get_connection()
-        cursor = conn.cursor()
+        cursor = self._get_connection().cursor()
         
         # Build query
         query = '''
         SELECT 
-            id, name, contact_name, email, phone, address, notes,
-            is_active, user_id, created_at, updated_at, synced
-        FROM clients 
-        WHERE 1=1
-        '''
-        
-        params = []
-        
-        # Add filters
-        if user_id:
-            query += ' AND user_id = ?'
-            params.append(user_id)
-            
-        if is_active is not None:
-            query += ' AND is_active = ?'
-            params.append(1 if is_active else 0)
-            
-        if synced is not None:
-            query += ' AND synced = ?'
-            params.append(1 if synced else 0)
-            
-        # Add sorting and pagination
-        query += ' ORDER BY name LIMIT ? OFFSET ?'
-        params.extend([limit, offset])
-        
-        # Execute query
-        cursor.execute(query, params)
-        
-        # Get results
-        results = cursor.fetchall()
-        
-        # Convert to list of dictionaries
-        column_names = [
-            'id', 'name', 'contact_name', 'email', 'phone', 'address', 'notes',
-            'is_active', 'user_id', 'created_at', 'updated_at', 'synced'
-        ]
-        
-        return [dict(zip(column_names, row)) for row in results]
-    except Exception as e:
-        logger.error(f"Error getting clients: {str(e)}")
-        return []
-
-# Project methods
-def create_project(self, name: str, user_id: str, **kwargs) -> Dict[str, Any]:
-    """
-    Create a new project.
-    
-    Args:
-        name: Name of the project
-        user_id: ID of the user who created the project
-        **kwargs: Additional project data
-        
-    Returns:
-        dict: The created project
-    """
-    try:
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        
-        # Generate a UUID for the project
-        project_id = str(uuid.uuid4())
-        
-        # Get current timestamp for created_at and updated_at
-        current_time = datetime.now().isoformat()
-        
-        # Prepare query and parameters
-        fields = ['id', 'name', 'user_id', 'created_at', 'updated_at']
-        values = [project_id, name, user_id, current_time, current_time]
-        
-        # Add optional fields
-        optional_fields = [
-            'client_id', 'description', 'color', 'hourly_rate', 'is_billable'
-        ]
-        
-        for field in optional_fields:
-            if field in kwargs and kwargs[field] is not None:
-                fields.append(field)
-                values.append(kwargs[field])
-        
-        # Set is_active and is_billable to true by default
-        if 'is_active' not in fields:
-            fields.append('is_active')
-            values.append(1)  # 1 = True in SQLite
-            
-        if 'is_billable' not in fields:
-            fields.append('is_billable')
-            values.append(1)  # 1 = True in SQLite
-            
-        # Create placeholders for SQL query
-        placeholders = ', '.join('?' for _ in range(len(fields)))
-        fields_str = ', '.join(fields)
-        
-        # Create new project
-        cursor.execute(
-            f'''
-            INSERT INTO projects 
-            ({fields_str}) 
-            VALUES ({placeholders})
-            ''',
-            values
-        )
-        
-        # Commit changes
-        conn.commit()
-        
-        # Return the created project
-        return self.get_project(project_id)
-    except Exception as e:
-        logger.error(f"Error creating project: {str(e)}")
-        conn.rollback()
-        raise
-
-def get_project(self, project_id: str) -> Dict[str, Any]:
-    """
-    Get a project by ID.
-    
-    Args:
-        project_id: ID of the project to get
-        
-    Returns:
-        dict: The project
-    """
-    try:
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        
-        # Get the project
-        cursor.execute(
-            '''
-            SELECT 
-                id, name, description, client_id, color, hourly_rate,
-                is_billable, is_active, user_id, created_at, updated_at, synced
-            FROM projects 
-            WHERE id = ?
-            ''',
-            (project_id,)
-        )
-        
-        project = cursor.fetchone()
-        
-        if not project:
-            logger.warning(f"Project not found: {project_id}")
-            return {}
-            
-        # Convert to dictionary
-        column_names = [
-            'id', 'name', 'description', 'client_id', 'color', 'hourly_rate',
-            'is_billable', 'is_active', 'user_id', 'created_at', 'updated_at', 'synced'
-        ]
-        
-        return dict(zip(column_names, project))
-    except Exception as e:
-        logger.error(f"Error getting project: {str(e)}")
-        return {}
-
-def update_project(self, project_id: str, **kwargs) -> Dict[str, Any]:
-    """
-    Update a project.
-    
-    Args:
-        project_id: ID of the project to update
-        **kwargs: Fields to update
-        
-    Returns:
-        dict: The updated project
-    """
-    try:
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        
-        # Build SET clause for SQL query
-        set_clause = []
-        params = []
-        
-        updateable_fields = [
-            'name', 'description', 'client_id', 'color', 
-            'hourly_rate', 'is_billable', 'is_active'
-        ]
-        
-        for field in updateable_fields:
-            if field in kwargs and kwargs[field] is not None:
-                set_clause.append(f"{field} = ?")
-                params.append(kwargs[field])
-        
-        # Add updated_at timestamp
-        set_clause.append("updated_at = CURRENT_TIMESTAMP")
-        
-        # Add project_id to params
-        params.append(project_id)
-        
-        if not set_clause:
-            logger.warning(f"No fields to update for project: {project_id}")
-            return self.get_project(project_id)
-        
-        # Update project
-        cursor.execute(
-            f'''
-            UPDATE projects 
-            SET {', '.join(set_clause)}
-            WHERE id = ?
-            ''',
-            params
-        )
-        
-        # Commit changes
-        conn.commit()
-        
-        # Return the updated project
-        return self.get_project(project_id)
-    except Exception as e:
-        logger.error(f"Error updating project: {str(e)}")
-        conn.rollback()
-        return {}
-
-def delete_project(self, project_id: str) -> bool:
-    """
-    Delete a project.
-    
-    Args:
-        project_id: ID of the project to delete
-        
-    Returns:
-        bool: True if project was deleted
-    """
-    try:
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        
-        # Delete project
-        cursor.execute(
-            'DELETE FROM projects WHERE id = ?',
-            (project_id,)
-        )
-        
-        # Commit changes
-        conn.commit()
-        
-        return cursor.rowcount > 0
-    except Exception as e:
-        logger.error(f"Error deleting project: {str(e)}")
-        conn.rollback()
-        return False
-
-def get_projects(
-    self,
-    limit: int = 50,
-    offset: int = 0,
-    user_id: Optional[str] = None,
-    client_id: Optional[str] = None,
-    is_active: Optional[bool] = None,
-    synced: Optional[bool] = None
-) -> List[Dict[str, Any]]:
-    """
-    Get projects with optional filtering.
-    
-    Args:
-        limit: Maximum number of projects to return
-        offset: Offset for pagination
-        user_id: Filter by user ID
-        client_id: Filter by client ID
-        is_active: Filter by active status
-        synced: Filter by synced status
-        
-    Returns:
-        list: List of projects
-    """
-    try:
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        
-        # Build query
-        query = '''
-        SELECT 
-            id, name, description, client_id, color, hourly_rate,
-            is_billable, is_active, user_id, created_at, updated_at, synced
+            id, name, client_id, description, color, 
+            hourly_rate, is_billable, is_active, user_id,
+            created_at, updated_at
         FROM projects 
-        WHERE 1=1
+        WHERE synced = 0 AND id > ?
+        ORDER BY id ASC
+        LIMIT 100
         '''
         
-        params = []
-        
-        # Add filters
-        if user_id:
-            query += ' AND user_id = ?'
-            params.append(user_id)
-            
-        if client_id:
-            query += ' AND client_id = ?'
-            params.append(client_id)
-            
-        if is_active is not None:
-            query += ' AND is_active = ?'
-            params.append(1 if is_active else 0)
-            
-        if synced is not None:
-            query += ' AND synced = ?'
-            params.append(1 if synced else 0)
-            
-        # Add sorting and pagination
-        query += ' ORDER BY name LIMIT ? OFFSET ?'
-        params.extend([limit, offset])
-        
         # Execute query
-        cursor.execute(query, params)
+        cursor.execute(query, (last_id,))
         
         # Get results
         results = cursor.fetchall()
         
         # Convert to list of dictionaries
         column_names = [
-            'id', 'name', 'description', 'client_id', 'color', 'hourly_rate',
-            'is_billable', 'is_active', 'user_id', 'created_at', 'updated_at', 'synced'
+            'id', 'name', 'client_id', 'description', 'color',
+            'hourly_rate', 'is_billable', 'is_active', 'user_id',
+            'created_at', 'updated_at'
         ]
         
         return [dict(zip(column_names, row)) for row in results]
     except Exception as e:
-        logger.error(f"Error getting projects: {str(e)}")
+        logger.error(f"Error getting unsynchronized projects: {str(e)}")
         return []
 
-# Project Task methods
-def create_project_task(self, name: str, project_id: str, **kwargs) -> Dict[str, Any]:
+def get_unsynchronized_clients(self, last_id: str = '') -> List[Dict[str, Any]]:
     """
-    Create a new project task.
+    Get unsynchronized clients.
     
     Args:
-        name: Name of the task
-        project_id: ID of the project
-        **kwargs: Additional task data
+        last_id: ID threshold to filter by
         
     Returns:
-        dict: The created task
+        list: List of unsynchronized clients
     """
     try:
-        conn = self._get_connection()
-        cursor = conn.cursor()
+        cursor = self._get_connection().cursor()
         
-        # Generate a UUID for the task
-        task_id = str(uuid.uuid4())
+        # Build query
+        query = '''
+        SELECT 
+            id, name, contact_name, email, phone, 
+            address, notes, is_active, user_id,
+            created_at, updated_at
+        FROM clients 
+        WHERE synced = 0 AND id > ?
+        ORDER BY id ASC
+        LIMIT 100
+        '''
         
-        # Get current timestamp for created_at and updated_at
-        current_time = datetime.now().isoformat()
+        # Execute query
+        cursor.execute(query, (last_id,))
         
-        # Prepare query and parameters
-        fields = ['id', 'name', 'project_id', 'created_at', 'updated_at']
-        values = [task_id, name, project_id, current_time, current_time]
+        # Get results
+        results = cursor.fetchall()
         
-        # Add optional fields
-        optional_fields = ['description', 'estimated_hours']
-        
-        for field in optional_fields:
-            if field in kwargs and kwargs[field] is not None:
-                fields.append(field)
-                values.append(kwargs[field])
-        
-        # Set is_active to true by default
-        if 'is_active' not in fields:
-            fields.append('is_active')
-            values.append(1)  # 1 = True in SQLite
-            
-        # Create placeholders for SQL query
-        placeholders = ', '.join('?' for _ in range(len(fields)))
-        fields_str = ', '.join(fields)
-        
-        # Create new task
-        cursor.execute(
-            f'''
-            INSERT INTO project_tasks 
-            ({fields_str}) 
-            VALUES ({placeholders})
-            ''',
-            values
-        )
-        
-        # Commit changes
-        conn.commit()
-        
-        # Return the created task
-        return self.get_project_task(task_id)
-    except Exception as e:
-        logger.error(f"Error creating project task: {str(e)}")
-        conn.rollback()
-        raise
-
-def get_project_task(self, task_id: str) -> Dict[str, Any]:
-    """
-    Get a project task by ID.
-    
-    Args:
-        task_id: ID of the task to get
-        
-    Returns:
-        dict: The task
-    """
-    try:
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        
-        # Get the task
-        cursor.execute(
-            '''
-            SELECT 
-                id, name, description, project_id, estimated_hours,
-                is_active, created_at, updated_at, synced
-            FROM project_tasks 
-            WHERE id = ?
-            ''',
-            (task_id,)
-        )
-        
-        task = cursor.fetchone()
-        
-        if not task:
-            logger.warning(f"Project task not found: {task_id}")
-            return {}
-            
-        # Convert to dictionary
+        # Convert to list of dictionaries
         column_names = [
-            'id', 'name', 'description', 'project_id', 'estimated_hours',
-            'is_active', 'created_at', 'updated_at', 'synced'
+            'id', 'name', 'contact_name', 'email', 'phone',
+            'address', 'notes', 'is_active', 'user_id',
+            'created_at', 'updated_at'
         ]
         
-        return dict(zip(column_names, task))
+        return [dict(zip(column_names, row)) for row in results]
     except Exception as e:
-        logger.error(f"Error getting project task: {str(e)}")
-        return {}
+        logger.error(f"Error getting unsynchronized clients: {str(e)}")
+        return []
 
-def update_project_task(self, task_id: str, **kwargs) -> Dict[str, Any]:
+def get_project_tasks(self, project_id: str) -> List[Dict[str, Any]]:
     """
-    Update a project task.
-    
-    Args:
-        task_id: ID of the task to update
-        **kwargs: Fields to update
-        
-    Returns:
-        dict: The updated task
-    """
-    try:
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        
-        # Build SET clause for SQL query
-        set_clause = []
-        params = []
-        
-        updateable_fields = [
-            'name', 'description', 'estimated_hours', 'is_active'
-        ]
-        
-        for field in updateable_fields:
-            if field in kwargs and kwargs[field] is not None:
-                set_clause.append(f"{field} = ?")
-                params.append(kwargs[field])
-        
-        # Add updated_at timestamp
-        set_clause.append("updated_at = CURRENT_TIMESTAMP")
-        
-        # Add task_id to params
-        params.append(task_id)
-        
-        if not set_clause:
-            logger.warning(f"No fields to update for task: {task_id}")
-            return self.get_project_task(task_id)
-        
-        # Update task
-        cursor.execute(
-            f'''
-            UPDATE project_tasks 
-            SET {', '.join(set_clause)}
-            WHERE id = ?
-            ''',
-            params
-        )
-        
-        # Commit changes
-        conn.commit()
-        
-        # Return the updated task
-        return self.get_project_task(task_id)
-    except Exception as e:
-        logger.error(f"Error updating project task: {str(e)}")
-        conn.rollback()
-        return {}
-
-def delete_project_task(self, task_id: str) -> bool:
-    """
-    Delete a project task.
-    
-    Args:
-        task_id: ID of the task to delete
-        
-    Returns:
-        bool: True if task was deleted
-    """
-    try:
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        
-        # Delete task
-        cursor.execute(
-            'DELETE FROM project_tasks WHERE id = ?',
-            (task_id,)
-        )
-        
-        # Commit changes
-        conn.commit()
-        
-        return cursor.rowcount > 0
-    except Exception as e:
-        logger.error(f"Error deleting project task: {str(e)}")
-        conn.rollback()
-        return False
-
-def get_project_tasks(
-    self,
-    project_id: str,
-    limit: int = 50,
-    offset: int = 0,
-    is_active: Optional[bool] = None,
-    synced: Optional[bool] = None
-) -> List[Dict[str, Any]]:
-    """
-    Get tasks for a project.
+    Get tasks for a specific project.
     
     Args:
         project_id: ID of the project
-        limit: Maximum number of tasks to return
-        offset: Offset for pagination
-        is_active: Filter by active status
-        synced: Filter by synced status
         
     Returns:
         list: List of tasks
     """
     try:
-        conn = self._get_connection()
-        cursor = conn.cursor()
+        cursor = self._get_connection().cursor()
         
         # Build query
         query = '''
         SELECT 
-            id, name, description, project_id, estimated_hours,
-            is_active, created_at, updated_at, synced
+            id, name, description, project_id, 
+            estimated_hours, is_active, created_at, updated_at
         FROM project_tasks 
         WHERE project_id = ?
+        ORDER BY name ASC
         '''
         
-        params = [project_id]
-        
-        # Add filters
-        if is_active is not None:
-            query += ' AND is_active = ?'
-            params.append(1 if is_active else 0)
-            
-        if synced is not None:
-            query += ' AND synced = ?'
-            params.append(1 if synced else 0)
-            
-        # Add sorting and pagination
-        query += ' ORDER BY name LIMIT ? OFFSET ?'
-        params.extend([limit, offset])
-        
         # Execute query
-        cursor.execute(query, params)
+        cursor.execute(query, (project_id,))
         
         # Get results
         results = cursor.fetchall()
         
         # Convert to list of dictionaries
         column_names = [
-            'id', 'name', 'description', 'project_id', 'estimated_hours',
-            'is_active', 'created_at', 'updated_at', 'synced'
+            'id', 'name', 'description', 'project_id',
+            'estimated_hours', 'is_active', 'created_at', 'updated_at'
         ]
         
         return [dict(zip(column_names, row)) for row in results]
@@ -815,287 +133,588 @@ def get_project_tasks(
         logger.error(f"Error getting project tasks: {str(e)}")
         return []
 
-# User Settings methods
-def get_user_settings(self, user_id: str) -> Dict[str, Any]:
+def update_project_sync_status(self, project_id: str, synced: bool) -> bool:
     """
-    Get settings for a user.
+    Update the sync status of a project.
     
     Args:
-        user_id: ID of the user
+        project_id: ID of the project
+        synced: Sync status to set
         
     Returns:
-        dict: The user's settings
+        bool: True if successful
     """
     try:
-        conn = self._get_connection()
-        cursor = conn.cursor()
+        cursor = self._get_connection().cursor()
         
-        # Get the settings
+        # Update the project
         cursor.execute(
-            '''
-            SELECT 
-                user_id, screenshot_interval, screenshot_quality, 
-                auto_sync_interval, idle_detection_timeout, theme,
-                notifications_enabled, created_at, updated_at, synced
-            FROM user_settings 
-            WHERE user_id = ?
-            ''',
-            (user_id,)
-        )
-        
-        settings = cursor.fetchone()
-        
-        if not settings:
-            # Create default settings
-            cursor.execute(
-                '''
-                INSERT INTO user_settings 
-                (user_id) 
-                VALUES (?)
-                ''',
-                (user_id,)
-            )
-            
-            conn.commit()
-            
-            # Try again
-            cursor.execute(
-                '''
-                SELECT 
-                    user_id, screenshot_interval, screenshot_quality, 
-                    auto_sync_interval, idle_detection_timeout, theme,
-                    notifications_enabled, created_at, updated_at, synced
-                FROM user_settings 
-                WHERE user_id = ?
-                ''',
-                (user_id,)
-            )
-            
-            settings = cursor.fetchone()
-            
-        # Convert to dictionary
-        column_names = [
-            'user_id', 'screenshot_interval', 'screenshot_quality', 
-            'auto_sync_interval', 'idle_detection_timeout', 'theme',
-            'notifications_enabled', 'created_at', 'updated_at', 'synced'
-        ]
-        
-        return dict(zip(column_names, settings))
-    except Exception as e:
-        logger.error(f"Error getting user settings: {str(e)}")
-        return {}
-
-def update_user_settings(self, user_id: str, **kwargs) -> Dict[str, Any]:
-    """
-    Update settings for a user.
-    
-    Args:
-        user_id: ID of the user
-        **kwargs: Settings to update
-        
-    Returns:
-        dict: The updated settings
-    """
-    try:
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        
-        # Get current settings
-        current_settings = self.get_user_settings(user_id)
-        
-        # If no settings exist, ensure user_id exists in the table
-        if not current_settings:
-            cursor.execute(
-                '''
-                INSERT OR IGNORE INTO user_settings 
-                (user_id) 
-                VALUES (?)
-                ''',
-                (user_id,)
-            )
-        
-        # Build SET clause for SQL query
-        set_clause = []
-        params = []
-        
-        updateable_fields = [
-            'screenshot_interval', 'screenshot_quality', 
-            'auto_sync_interval', 'idle_detection_timeout', 
-            'theme', 'notifications_enabled'
-        ]
-        
-        for field in updateable_fields:
-            if field in kwargs and kwargs[field] is not None:
-                set_clause.append(f"{field} = ?")
-                params.append(kwargs[field])
-        
-        if not set_clause:
-            logger.warning(f"No settings to update for user: {user_id}")
-            return self.get_user_settings(user_id)
-        
-        # Add updated_at timestamp
-        set_clause.append("updated_at = CURRENT_TIMESTAMP")
-        set_clause.append("synced = 0")
-        
-        # Add user_id to params
-        params.append(user_id)
-        
-        # Update settings
-        cursor.execute(
-            f'''
-            UPDATE user_settings 
-            SET {', '.join(set_clause)}
-            WHERE user_id = ?
-            ''',
-            params
+            'UPDATE projects SET synced = ? WHERE id = ?',
+            (1 if synced else 0, project_id)
         )
         
         # Commit changes
-        conn.commit()
+        self._get_connection().commit()
         
-        # Return the updated settings
-        return self.get_user_settings(user_id)
+        return True
     except Exception as e:
-        logger.error(f"Error updating user settings: {str(e)}")
-        conn.rollback()
-        return {}
+        logger.error(f"Error updating project sync status: {str(e)}")
+        self._get_connection().rollback()
+        return False
 
-# User Profile methods
-def get_user_profile(self, user_id: str) -> Dict[str, Any]:
+def update_client_sync_status(self, client_id: str, synced: bool) -> bool:
     """
-    Get profile for a user.
+    Update the sync status of a client.
     
     Args:
-        user_id: ID of the user
+        client_id: ID of the client
+        synced: Sync status to set
         
     Returns:
-        dict: The user's profile
+        bool: True if successful
     """
     try:
-        conn = self._get_connection()
-        cursor = conn.cursor()
+        cursor = self._get_connection().cursor()
         
-        # Get the profile
+        # Update the client
         cursor.execute(
-            '''
-            SELECT 
-                user_id, name, email, timezone, hourly_rate,
-                avatar_url, created_at, updated_at, synced
-            FROM user_profiles 
-            WHERE user_id = ?
-            ''',
-            (user_id,)
-        )
-        
-        profile = cursor.fetchone()
-        
-        if not profile:
-            # Create default profile
-            cursor.execute(
-                '''
-                INSERT INTO user_profiles 
-                (user_id) 
-                VALUES (?)
-                ''',
-                (user_id,)
-            )
-            
-            conn.commit()
-            
-            # Try again
-            cursor.execute(
-                '''
-                SELECT 
-                    user_id, name, email, timezone, hourly_rate,
-                    avatar_url, created_at, updated_at, synced
-                FROM user_profiles 
-                WHERE user_id = ?
-                ''',
-                (user_id,)
-            )
-            
-            profile = cursor.fetchone()
-            
-        # Convert to dictionary
-        column_names = [
-            'user_id', 'name', 'email', 'timezone', 'hourly_rate',
-            'avatar_url', 'created_at', 'updated_at', 'synced'
-        ]
-        
-        return dict(zip(column_names, profile))
-    except Exception as e:
-        logger.error(f"Error getting user profile: {str(e)}")
-        return {}
-
-def update_user_profile(self, user_id: str, **kwargs) -> Dict[str, Any]:
-    """
-    Update profile for a user.
-    
-    Args:
-        user_id: ID of the user
-        **kwargs: Profile fields to update
-        
-    Returns:
-        dict: The updated profile
-    """
-    try:
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        
-        # Get current profile
-        current_profile = self.get_user_profile(user_id)
-        
-        # If no profile exists, ensure user_id exists in the table
-        if not current_profile:
-            cursor.execute(
-                '''
-                INSERT OR IGNORE INTO user_profiles 
-                (user_id) 
-                VALUES (?)
-                ''',
-                (user_id,)
-            )
-        
-        # Build SET clause for SQL query
-        set_clause = []
-        params = []
-        
-        updateable_fields = [
-            'name', 'email', 'timezone', 'hourly_rate', 'avatar_url'
-        ]
-        
-        for field in updateable_fields:
-            if field in kwargs and kwargs[field] is not None:
-                set_clause.append(f"{field} = ?")
-                params.append(kwargs[field])
-        
-        if not set_clause:
-            logger.warning(f"No profile fields to update for user: {user_id}")
-            return self.get_user_profile(user_id)
-        
-        # Add updated_at timestamp
-        set_clause.append("updated_at = CURRENT_TIMESTAMP")
-        set_clause.append("synced = 0")
-        
-        # Add user_id to params
-        params.append(user_id)
-        
-        # Update profile
-        cursor.execute(
-            f'''
-            UPDATE user_profiles 
-            SET {', '.join(set_clause)}
-            WHERE user_id = ?
-            ''',
-            params
+            'UPDATE clients SET synced = ? WHERE id = ?',
+            (1 if synced else 0, client_id)
         )
         
         # Commit changes
-        conn.commit()
+        self._get_connection().commit()
         
-        # Return the updated profile
-        return self.get_user_profile(user_id)
+        return True
     except Exception as e:
-        logger.error(f"Error updating user profile: {str(e)}")
-        conn.rollback()
-        return {}
+        logger.error(f"Error updating client sync status: {str(e)}")
+        self._get_connection().rollback()
+        return False
+
+def get_unsynchronized_user_profiles(self, last_id: str = '') -> List[Dict[str, Any]]:
+    """
+    Get unsynchronized user profiles.
+    
+    Args:
+        last_id: ID threshold to filter by
+        
+    Returns:
+        list: List of unsynchronized user profiles
+    """
+    try:
+        cursor = self._get_connection().cursor()
+        
+        # Query for user_profiles table exists
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='user_profiles'")
+        table_exists = cursor.fetchone() is not None
+        
+        if not table_exists:
+            logger.warning("user_profiles table does not exist in local database")
+            return []
+        
+        # Check if 'synced' column exists
+        try:
+            cursor.execute("PRAGMA table_info(user_profiles)")
+            columns = cursor.fetchall()
+            column_names = [col[1] for col in columns]
+            
+            if 'synced' not in column_names:
+                logger.warning("'synced' column does not exist in user_profiles table")
+                # Add synced column if it doesn't exist
+                try:
+                    cursor.execute("ALTER TABLE user_profiles ADD COLUMN synced INTEGER DEFAULT 0")
+                    self._get_connection().commit()
+                    logger.info("Added 'synced' column to user_profiles table")
+                except Exception as add_error:
+                    logger.error(f"Error adding 'synced' column: {str(add_error)}")
+                    return []
+        except Exception as col_error:
+            logger.error(f"Error checking columns: {str(col_error)}")
+            return []
+            
+        # Get column names from the actual table
+        cursor.execute("PRAGMA table_info(user_profiles)")
+        columns = cursor.fetchall()
+        actual_columns = [col[1] for col in columns]
+        
+        # Create a SQL query based on the actual columns
+        id_column = 'id' if 'id' in actual_columns else 'user_id'
+        name_column = 'full_name' if 'full_name' in actual_columns else ('display_name' if 'display_name' in actual_columns else 'name')
+        
+        # Build a dynamic query based on available columns
+        query_columns = ', '.join(actual_columns)
+        
+        # Build query
+        query = f'''
+        SELECT {query_columns}
+        FROM user_profiles 
+        WHERE synced = 0 AND {id_column} > ?
+        ORDER BY {id_column} ASC
+        LIMIT 100
+        '''
+        
+        # Execute query
+        cursor.execute(query, (last_id,))
+        
+        # Get results
+        results = cursor.fetchall()
+        
+        # Convert to list of dictionaries
+        return [dict(zip(actual_columns, row)) for row in results]
+    except Exception as e:
+        logger.error(f"Error getting unsynchronized user profiles: {str(e)}")
+        return []
+
+def get_unsynchronized_user_settings(self, last_id: str = '') -> List[Dict[str, Any]]:
+    """
+    Get unsynchronized user settings.
+    
+    Args:
+        last_id: ID threshold to filter by
+        
+    Returns:
+        list: List of unsynchronized user settings
+    """
+    try:
+        cursor = self._get_connection().cursor()
+        
+        # Query for user_settings table exists
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='user_settings'")
+        table_exists = cursor.fetchone() is not None
+        
+        if not table_exists:
+            logger.warning("user_settings table does not exist in local database")
+            return []
+        
+        # Check if 'synced' column exists
+        try:
+            cursor.execute("PRAGMA table_info(user_settings)")
+            columns = cursor.fetchall()
+            column_names = [col[1] for col in columns]
+            
+            if 'synced' not in column_names:
+                logger.warning("'synced' column does not exist in user_settings table")
+                # Add synced column if it doesn't exist
+                try:
+                    cursor.execute("ALTER TABLE user_settings ADD COLUMN synced INTEGER DEFAULT 0")
+                    self._get_connection().commit()
+                    logger.info("Added 'synced' column to user_settings table")
+                except Exception as add_error:
+                    logger.error(f"Error adding 'synced' column: {str(add_error)}")
+                    return []
+        except Exception as col_error:
+            logger.error(f"Error checking columns: {str(col_error)}")
+            return []
+            
+        # Get column names from the actual table
+        cursor.execute("PRAGMA table_info(user_settings)")
+        columns = cursor.fetchall()
+        actual_columns = [col[1] for col in columns]
+        
+        # Determine the ID column - Supabase uses user_id as primary key
+        id_column = 'user_id' 
+        
+        # Build a dynamic query based on available columns
+        query_columns = ', '.join(actual_columns)
+        
+        # Build query
+        query = f'''
+        SELECT {query_columns}
+        FROM user_settings 
+        WHERE synced = 0 AND {id_column} > ?
+        ORDER BY {id_column} ASC
+        LIMIT 100
+        '''
+        
+        # Execute query
+        cursor.execute(query, (last_id,))
+        
+        # Get results
+        results = cursor.fetchall()
+        
+        # Convert to list of dictionaries
+        return [dict(zip(actual_columns, row)) for row in results]
+    except Exception as e:
+        logger.error(f"Error getting unsynchronized user settings: {str(e)}")
+        return []
+
+def get_unsynchronized_project_tasks(self, last_id: str = '') -> List[Dict[str, Any]]:
+    """
+    Get unsynchronized project tasks.
+    
+    Args:
+        last_id: ID threshold to filter by
+        
+    Returns:
+        list: List of unsynchronized project tasks
+    """
+    try:
+        cursor = self._get_connection().cursor()
+        
+        # Query for project_tasks table exists
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='project_tasks'")
+        table_exists = cursor.fetchone() is not None
+        
+        if not table_exists:
+            logger.warning("project_tasks table does not exist in local database")
+            return []
+        
+        # Build query
+        query = '''
+        SELECT 
+            id, name, description, project_id, estimated_hours,
+            is_active, synced, created_at, updated_at
+        FROM project_tasks 
+        WHERE synced = 0 AND id > ?
+        ORDER BY id ASC
+        LIMIT 100
+        '''
+        
+        # Execute query
+        cursor.execute(query, (last_id,))
+        
+        # Get results
+        results = cursor.fetchall()
+        
+        # Convert to list of dictionaries
+        column_names = [
+            'id', 'name', 'description', 'project_id', 'estimated_hours',
+            'is_active', 'synced', 'created_at', 'updated_at'
+        ]
+        
+        return [dict(zip(column_names, row)) for row in results]
+    except Exception as e:
+        logger.error(f"Error getting unsynchronized project tasks: {str(e)}")
+        return []
+        
+def update_user_profile_sync_status(self, profile_id: str, synced: bool) -> bool:
+    """
+    Update the sync status of a user profile.
+    
+    Args:
+        profile_id: ID of the user profile
+        synced: Sync status to set
+        
+    Returns:
+        bool: True if successful
+    """
+    try:
+        cursor = self._get_connection().cursor()
+        
+        # First check which primary key column exists in the table
+        cursor.execute("PRAGMA table_info(user_profiles)")
+        columns = cursor.fetchall()
+        column_names = [col[1] for col in columns]
+        
+        # Determine primary key column
+        pk_column = None
+        if "id" in column_names:
+            pk_column = "id"
+        elif "user_id" in column_names:
+            pk_column = "user_id"
+        else:
+            raise ValueError("Cannot determine primary key column for user_profiles table")
+        
+        # Update the user profile
+        cursor.execute(
+            f'UPDATE user_profiles SET synced = ? WHERE {pk_column} = ?',
+            (1 if synced else 0, profile_id)
+        )
+        
+        # Commit changes
+        self._get_connection().commit()
+        
+        return True
+    except Exception as e:
+        logger.error(f"Error updating user profile sync status: {str(e)}")
+        self._get_connection().rollback()
+        return False
+
+def update_user_setting_sync_status(self, setting_id: str, synced: bool) -> bool:
+    """
+    Update the sync status of a user setting.
+    
+    Args:
+        setting_id: ID of the user setting (user_id in Supabase)
+        synced: Sync status to set
+        
+    Returns:
+        bool: True if successful
+    """
+    try:
+        cursor = self._get_connection().cursor()
+        
+        # First check which primary key column exists in the table
+        cursor.execute("PRAGMA table_info(user_settings)")
+        columns = cursor.fetchall()
+        column_names = [col[1] for col in columns]
+        
+        # Determine primary key column - in Supabase this is user_id
+        if "user_id" in column_names:
+            # Update the user setting using user_id
+            cursor.execute(
+                'UPDATE user_settings SET synced = ? WHERE user_id = ?',
+                (1 if synced else 0, setting_id)
+            )
+        elif "id" in column_names:
+            # Fallback to id if user_id doesn't exist
+            cursor.execute(
+                'UPDATE user_settings SET synced = ? WHERE id = ?',
+                (1 if synced else 0, setting_id)
+            )
+        else:
+            raise ValueError("Cannot find user_id or id column in user_settings table")
+        
+        # Commit changes
+        self._get_connection().commit()
+        
+        return True
+    except Exception as e:
+        logger.error(f"Error updating user setting sync status: {str(e)}")
+        self._get_connection().rollback()
+        return False
+        
+def update_project_task_sync_status(self, task_id: str, synced: bool) -> bool:
+    """
+    Update the sync status of a project task.
+    
+    Args:
+        task_id: ID of the project task
+        synced: Sync status to set
+        
+    Returns:
+        bool: True if successful
+    """
+    try:
+        cursor = self._get_connection().cursor()
+        
+        # Update the project task
+        cursor.execute(
+            'UPDATE project_tasks SET synced = ? WHERE id = ?',
+            (1 if synced else 0, task_id)
+        )
+        
+        # Commit changes
+        self._get_connection().commit()
+        
+        return True
+    except Exception as e:
+        logger.error(f"Error updating project task sync status: {str(e)}")
+        self._get_connection().rollback()
+        return False
+
+def get_unsynchronized_activity_logs(self, last_id: int = 0) -> List[Dict[str, Any]]:
+    """
+    Get unsynchronized activity logs with improved schema handling.
+    
+    Args:
+        last_id: ID threshold to filter by
+        
+    Returns:
+        list: List of unsynchronized activity logs
+    """
+    try:
+        cursor = self._get_connection().cursor()
+        
+        # Query for activity_logs table exists
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='activity_logs'")
+        table_exists = cursor.fetchone() is not None
+        
+        if not table_exists:
+            logger.warning("activity_logs table does not exist in local database")
+            return []
+        
+        # Check if 'synced' column exists
+        try:
+            cursor.execute("PRAGMA table_info(activity_logs)")
+            columns = cursor.fetchall()
+            column_names = [col[1] for col in columns]
+            
+            if 'synced' not in column_names:
+                logger.warning("'synced' column does not exist in activity_logs table")
+                # Add synced column if it doesn't exist
+                try:
+                    cursor.execute("ALTER TABLE activity_logs ADD COLUMN synced INTEGER DEFAULT 0")
+                    self._get_connection().commit()
+                    logger.info("Added 'synced' column to activity_logs table")
+                except Exception as add_error:
+                    logger.error(f"Error adding 'synced' column: {str(add_error)}")
+                    return []
+        except Exception as col_error:
+            logger.error(f"Error checking columns: {str(col_error)}")
+            return []
+            
+        # Get column names from the actual table
+        cursor.execute("PRAGMA table_info(activity_logs)")
+        columns = cursor.fetchall()
+        actual_columns = [col[1] for col in columns]
+        
+        # Build a dynamic query based on available columns
+        query_columns = ', '.join(actual_columns)
+        
+        # Build query
+        query = f'''
+        SELECT {query_columns}
+        FROM activity_logs 
+        WHERE synced = 0 AND id > ?
+        ORDER BY id ASC
+        LIMIT 100
+        '''
+        
+        # Execute query
+        cursor.execute(query, (last_id,))
+        
+        # Get results
+        results = cursor.fetchall()
+        
+        # Convert to list of dictionaries
+        return [dict(zip(actual_columns, row)) for row in results]
+    except Exception as e:
+        logger.error(f"Error getting unsynchronized activity logs: {str(e)}")
+        return []
+
+def update_activity_log_sync_status(self, entry_id: int, synced: bool) -> bool:
+    """
+    Update the sync status of an activity log.
+    
+    Args:
+        entry_id: ID of the activity log
+        synced: Sync status to set
+        
+    Returns:
+        bool: True if successful
+    """
+    try:
+        cursor = self._get_connection().cursor()
+        
+        # First check which primary key column exists in the table
+        cursor.execute("PRAGMA table_info(activity_logs)")
+        columns = cursor.fetchall()
+        column_names = [col[1] for col in columns]
+        
+        # Verify the id column exists
+        if "id" not in column_names:
+            raise ValueError("Required 'id' column not found in activity_logs table")
+        
+        # Update the activity log's sync status
+        cursor.execute(
+            'UPDATE activity_logs SET synced = ? WHERE id = ?',
+            (1 if synced else 0, entry_id)
+        )
+        
+        # Commit changes
+        self._get_connection().commit()
+        
+        return True
+    except Exception as e:
+        logger.error(f"Error updating activity log sync status: {str(e)}")
+        self._get_connection().rollback()
+        return False
+
+def get_unsynchronized_time_entries(self, last_id: str = '') -> List[Dict[str, Any]]:
+    """
+    Get unsynchronized time entries from the time_entries table.
+    
+    Args:
+        last_id: ID threshold to filter by (UUID string)
+        
+    Returns:
+        list: List of unsynchronized time entries
+    """
+    try:
+        cursor = self._get_connection().cursor()
+        
+        # Query for time_entries table exists
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='time_entries'")
+        table_exists = cursor.fetchone() is not None
+        
+        if not table_exists:
+            logger.warning("time_entries table does not exist in local database")
+            return []
+        
+        # Check if 'synced' column exists
+        try:
+            cursor.execute("PRAGMA table_info(time_entries)")
+            columns = cursor.fetchall()
+            column_names = [col[1] for col in columns]
+            
+            if 'synced' not in column_names:
+                logger.warning("'synced' column does not exist in time_entries table")
+                # Add synced column if it doesn't exist
+                try:
+                    cursor.execute("ALTER TABLE time_entries ADD COLUMN synced INTEGER DEFAULT 0")
+                    self._get_connection().commit()
+                    logger.info("Added 'synced' column to time_entries table")
+                except Exception as add_error:
+                    logger.error(f"Error adding 'synced' column: {str(add_error)}")
+                    return []
+        except Exception as col_error:
+            logger.error(f"Error checking columns: {str(col_error)}")
+            return []
+            
+        # Get column names from the actual table
+        cursor.execute("PRAGMA table_info(time_entries)")
+        columns = cursor.fetchall()
+        actual_columns = [col[1] for col in columns]
+        
+        # Build a dynamic query based on available columns
+        query_columns = ', '.join(actual_columns)
+        
+        # Build query - note we use string comparison for UUID
+        query = f'''
+        SELECT {query_columns}
+        FROM time_entries 
+        WHERE synced = 0 AND id > ?
+        ORDER BY id ASC
+        LIMIT 100
+        '''
+        
+        # Execute query
+        cursor.execute(query, (last_id,))
+        
+        # Get results
+        results = cursor.fetchall()
+        
+        # Convert to list of dictionaries
+        return [dict(zip(actual_columns, row)) for row in results]
+    except Exception as e:
+        logger.error(f"Error getting unsynchronized time entries: {str(e)}")
+        return []
+
+def update_time_entry_sync_status(self, entry_id: str, synced: bool) -> bool:
+    """
+    Update the sync status of a time entry in the time_entries table.
+    
+    Args:
+        entry_id: ID of the time entry (UUID string)
+        synced: Sync status to set
+        
+    Returns:
+        bool: True if successful
+    """
+    try:
+        cursor = self._get_connection().cursor()
+        
+        # First check which primary key column exists in the table
+        cursor.execute("PRAGMA table_info(time_entries)")
+        columns = cursor.fetchall()
+        column_names = [col[1] for col in columns]
+        
+        # Verify the id column exists
+        if "id" not in column_names:
+            raise ValueError("Required 'id' column not found in time_entries table")
+        
+        # Update the time entry's sync status
+        cursor.execute(
+            'UPDATE time_entries SET synced = ? WHERE id = ?',
+            (1 if synced else 0, entry_id)
+        )
+        
+        # Commit changes
+        self._get_connection().commit()
+        
+        return True
+    except Exception as e:
+        logger.error(f"Error updating time entry sync status: {str(e)}")
+        self._get_connection().rollback()
+        return False

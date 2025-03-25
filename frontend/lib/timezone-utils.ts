@@ -23,30 +23,38 @@ export function getAdjustedTimestamp(dateString: string, timezone?: string, useL
       normalizedDateString = dateString + 'Z';
     }
     
-    // If no timezone is provided or we don't want to adjust, just use the timestamp as is
-    if (!timezone || !useLocalTime) {
-      const timestamp = new Date(normalizedDateString).getTime();
-      console.log("[TIMER DEBUG] No timezone adjustment, returning:", timestamp);
-      return timestamp;
-    }
-    
-    // Parse the date and get timestamp
+    // Get the server timestamp
     const timestamp = new Date(normalizedDateString).getTime();
     const now = Date.now();
     
-    // Safety check: ensure timestamp is not thousands of years in future
-    // This happens with timezone bugs, but we still want to allow timestamps
-    // that are a few seconds in the future due to clock skew
-    const oneHourInMs = 60 * 60 * 1000;
-    if (timestamp > now + oneHourInMs) {
-      console.log("[TIMER DEBUG] Timestamp far in future, likely timezone issue:", { 
-        original: timestamp, 
+    // Detect likely timezone issues: if timestamp is more than 7 hours in the future or past
+    // This would indicate a timezone offset issue that needs correction
+    const sevenHoursMs = 7 * 60 * 60 * 1000;
+    if (Math.abs(timestamp - now) > sevenHoursMs) {
+      console.log("[TIMER DEBUG] Detected likely timezone offset issue:", { 
+        original: timestamp,
+        now: now,
         diff: timestamp - now,
-        adjustedTo: now
+        diffHours: (timestamp - now) / (60 * 60 * 1000)
       });
-      return now; // Cap at current time to prevent negative elapsed time
+      
+      // Calculate the detected offset hours (roughly)
+      const offsetHours = Math.round((timestamp - now) / (60 * 60 * 1000));
+      
+      // If offset is likely a timezone issue, correct it by adjusting the timestamp
+      // For example, if timestamp is 7 hours ahead, we subtract 7 hours
+      const correctedTimestamp = timestamp - (offsetHours * 60 * 60 * 1000);
+      
+      console.log("[TIMER DEBUG] Applied timezone correction:", {
+        offsetHours,
+        correctedTimestamp,
+        diffFromNowAfterCorrection: correctedTimestamp - now
+      });
+      
+      return correctedTimestamp;
     }
     
+    // If timestamp is reasonable (within 7 hours), use it as is
     console.log("[TIMER DEBUG] Timestamp is reasonable:", {
       timestamp,
       diffFromNow: timestamp - now

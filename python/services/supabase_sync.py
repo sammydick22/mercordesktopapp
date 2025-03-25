@@ -107,7 +107,9 @@ class SupabaseSyncService:
             
     async def sync_activity_logs(self) -> Dict[str, Any]:
         """
-        Synchronize activity logs from local database to Supabase.
+        Synchronize activity logs (time entries) from local database to Supabase.
+        
+        Uses improved error handling and schema validation similar to user profiles and settings.
         
         Returns:
             dict: Sync results with counts and status
@@ -120,12 +122,10 @@ class SupabaseSyncService:
             logger.warning("Cannot sync activity logs: Not authenticated")
             return {"synced": 0, "failed": 0, "status": "not_authenticated"}
             
-        if self.is_syncing:
-            logger.warning("Sync already in progress")
-            return {"synced": 0, "failed": 0, "status": "in_progress"}
-            
         try:
-            self.is_syncing = True
+            # Only set is_syncing flag when called directly (not from sync_all)
+            if not self.is_syncing:
+                self.is_syncing = True
             self.sync_failed = False
             self.sync_error = None
             
@@ -142,7 +142,18 @@ class SupabaseSyncService:
             last_sync_id = self.last_sync.get("activity_logs", {}).get("last_id", 0)
             
             # Get unsynchronized activity logs
-            activity_logs = self.db_service.get_unsynchronized_activity_logs(last_sync_id)
+            try:
+                # First try the correct method for activity logs
+                activity_logs = self.db_service.get_unsynchronized_activity_logs(last_sync_id)
+            except AttributeError:
+                try:
+                    # Fallback to time entries method as a last resort
+                    logger.warning("get_unsynchronized_activity_logs method not found, falling back to get_unsynchronized_time_entries")
+                    activity_logs = self.db_service.get_unsynchronized_time_entries(last_sync_id)
+                except AttributeError:
+                    logger.error("Neither get_unsynchronized_activity_logs nor get_unsynchronized_time_entries methods found")
+                    self.is_syncing = False
+                    return {"synced": 0, "failed": 0, "status": "error"}
             
             if not activity_logs:
                 logger.info("No activity logs to sync")
@@ -151,19 +162,64 @@ class SupabaseSyncService:
             
             logger.info(f"Syncing {len(activity_logs)} activity logs")
             
-            # Prepare activity logs for Supabase
+            # Prepare activity logs for Supabase with proper field validation and type conversion
+            # The key issue: activity_logs use numeric auto-increment IDs locally,
+            # but Supabase expects UUIDs. We'll let Supabase generate the UUIDs.
+            import uuid
+            
             supabase_activities = []
+            local_id_map = {}  # For tracking which local ID corresponds to which batch record
+            
             for log in activity_logs:
-                supabase_activities.append({
-                    "user_id": user_id,
-                    "org_id": org_id,
-                    "window_title": log["window_title"],
-                    "process_name": log["process_name"],
-                    "executable_path": log.get("executable_path"),
-                    "start_time": log["start_time"],
-                    "end_time": log.get("end_time"),
-                    "client_created_at": log.get("created_at") or datetime.now().isoformat()
-                })
+                try:
+                    # Don't include the local numeric ID in the Supabase record
+                    # Build a valid Supabase record with fallbacks for missing fields
+                    supabase_record = {
+                        "user_id": user_id,
+                        "org_id": org_id,
+                        "window_title": log.get("window_title", "Unknown"),
+                        "process_name": log.get("process_name", "Unknown")
+                    }
+                    
+                    # Store local ID mapping for later use when updating sync status
+                    local_id = log["id"]
+                    
+                    # Handle client_created_at with proper ISO format
+                    if log.get("created_at"):
+                        supabase_record["client_created_at"] = log["created_at"]
+                    else:
+                        supabase_record["client_created_at"] = datetime.now().isoformat()
+                    
+                    # Add optional fields only if they exist with proper type conversion
+                    if log.get("executable_path"):
+                        supabase_record["executable_path"] = log["executable_path"]
+                    
+                    # Handle timestamps
+                    if log.get("start_time"):
+                        supabase_record["start_time"] = log["start_time"]
+                    
+                    if log.get("end_time"):
+                        supabase_record["end_time"] = log["end_time"]
+                    
+                    # Convert duration to integer (required by Supabase schema)
+                    if log.get("duration") is not None:
+                        # First try to convert to float, then to int
+                        try:
+                            duration_float = float(log["duration"])
+                            # Ensure it's a positive integer by taking absolute value and rounding
+                            supabase_record["duration"] = int(abs(duration_float))
+                            logger.debug(f"Converted duration from {log['duration']} to {supabase_record['duration']}")
+                        except (ValueError, TypeError):
+                            logger.warning(f"Could not convert duration to integer: {log['duration']}, omitting field")
+                    
+                    # Store the record and mapping
+                    supabase_activities.append(supabase_record)
+                    # Map the position in the batch to the local ID
+                    local_id_map[len(supabase_activities) - 1] = local_id
+                    
+                except Exception as e:
+                    logger.error(f"Error preparing activity log {log.get('id')}: {str(e)}")
+                    continue
             
             # Split into batches to avoid request size limits
             batch_size = 50
@@ -172,26 +228,48 @@ class SupabaseSyncService:
             synced_count = 0
             failed_count = 0
             
-            for batch in batches:
+            for batch_index, batch in enumerate(batches):
                 try:
+                    logger.info(f"Processing activity logs batch {batch_index+1}/{len(batches)} ({len(batch)} items)")
+                    
                     # Use Supabase client to insert data
                     result = self.supabase.table("activity_logs").insert(batch).execute()
                     
                     if result and result.data:
-                        synced_count += len(batch)
+                        batch_synced_count = len(result.data)
+                        synced_count += batch_synced_count
+                        logger.info(f"Successfully synced {batch_synced_count} activity logs to Supabase")
                         
-                        # Update local database with sync status
-                        for i, _ in enumerate(batch):
-                            original_log = activity_logs[synced_count - len(batch) + i]
-                            # Don't await boolean return values
-                            self.db_service.update_activity_log_sync_status(original_log["id"], True)
+                        # Update local database with sync status using the local ID mapping
+                        for i in range(batch_synced_count):
+                            try:
+                                # Get the batch index which maps to a local ID
+                                batch_index = i
+                                if batch_index < len(batch):
+                                    # Get the local ID that corresponds to this record's position in the batch
+                                    batch_position = synced_count - batch_synced_count + i
+                                    local_id = local_id_map.get(batch_position % len(batch))
+                                    
+                                    if local_id:
+                                        # Try the update methods with the correct local ID
+                                        try:
+                                            logger.debug(f"Updating sync status for activity log: {local_id}")
+                                            self.db_service.update_activity_log_sync_status(local_id, True)
+                                        except AttributeError:
+                                            logger.debug("Falling back to update_time_entry_sync_status method")
+                                            self.db_service.update_time_entry_sync_status(local_id, True)
+                                    else:
+                                        logger.warning(f"Could not find local ID mapping for batch position {batch_position}")
+                                        
+                            except Exception as update_error:
+                                logger.error(f"Error updating activity log sync status: {str(update_error)}")
                     else:
                         failed_count += len(batch)
-                        logger.error(f"Sync error: No response data")
+                        logger.error(f"Sync error: No response data for batch {batch_index+1}")
                         
                 except Exception as e:
                     failed_count += len(batch)
-                    logger.error(f"Batch sync error: {str(e)}")
+                    logger.error(f"Batch sync error for batch {batch_index+1}: {str(e)}")
             
             # Update last sync status
             if synced_count > 0:
@@ -211,6 +289,8 @@ class SupabaseSyncService:
                 
         except Exception as e:
             logger.error(f"Activity logs sync error: {str(e)}")
+            import traceback
+            logger.error(f"Activity logs sync traceback: {traceback.format_exc()}")
             self.sync_failed = True
             self.sync_error = str(e)
             return {"synced": 0, "failed": len(activity_logs) if 'activity_logs' in locals() else 0, "status": "error"}
@@ -233,12 +313,10 @@ class SupabaseSyncService:
             logger.warning("Cannot sync screenshots: Not authenticated")
             return {"synced": 0, "failed": 0, "status": "not_authenticated"}
             
-        if self.is_syncing:
-            logger.warning("Sync already in progress")
-            return {"synced": 0, "failed": 0, "status": "in_progress"}
-            
         try:
-            self.is_syncing = True
+            # Only set is_syncing flag when called directly (not from sync_all)
+            if not self.is_syncing:
+                self.is_syncing = True
             self.sync_failed = False
             self.sync_error = None
             
