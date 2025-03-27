@@ -24,7 +24,10 @@ apiClient.interceptors.response.use(
   (response) => response,
   async (error) => {
     const originalRequest = error.config
-    if (error.response?.status === 401 && !originalRequest._retry) {
+    // Only try to refresh if we have an auth token to begin with
+    const hasAuthToken = localStorage.getItem("auth_token")
+    
+    if (error.response?.status === 401 && !originalRequest._retry && hasAuthToken) {
       originalRequest._retry = true
       try {
         // Call refresh token endpoint

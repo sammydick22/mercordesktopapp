@@ -42,7 +42,7 @@ function createWindow() {
     mainWindow.loadURL('http://localhost:3000');
     // Optional: Open DevTools automatically (comment out for production)
     // mainWindow.webContents.openDevTools();
-  }, 5000);
+  }, 10000);
 
   mainWindow.on('closed', function() {
     mainWindow = null;
