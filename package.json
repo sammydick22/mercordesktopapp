@@ -1,0 +1,63 @@
+{
+  "name": "mercor-timetracker",
+  "version": "1.0.0",
+  "description": "Mercor Time Tracker Desktop Application",
+  "main": "dist/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "concurrently \"cd frontend && npm run dev\" \"cd python && python -m api.main\" \"tsc -p electron/tsconfig.json -w\" \"electron .\"",
+    "build": "tsc -p electron/tsconfig.json && cd frontend && npm run build",
+    "package": "npm run build && electron-builder build --win --publish never",
+    "package-mac": "npm run build && electron-builder build --mac",
+    "package-linux": "npm run build && electron-builder build --linux",
+    "postinstall": "cd frontend && npm install"
+  },
+  "author": "Mercor",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.17.27",
+    "concurrently": "^8.2.2",
+    "electron": "^29.4.6",
+    "electron-builder": "^24.13.3",
+    "electron-packager": "^17.1.2",
+    "typescript": "^5.8.2"
+  },
+  "dependencies": {
+    "axios": "latest",
+    "electron-squirrel-startup": "^1.0.0",
+    "electron-updater": "^6.1.7"
+  },
+  "build": {
+    "appId": "com.mercor.timetracker",
+    "productName": "Mercor Time Tracker",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "node_modules/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "frontend/out",
+        "to": "app"
+      },
+      {
+        "from": "python",
+        "to": "python",
+        "filter": [
+          "**/*",
+          "!**/__pycache__/**",
+          "!**/.pytest_cache/**"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "sign": false
+    }
+  }
+}
